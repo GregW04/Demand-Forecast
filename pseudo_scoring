@@ -1,0 +1,34 @@
+function run_scoring_pipeline(max_lag,
+                              scoring_period,        # [t_min, t_max] to forecast
+                              artifacts_dir,
+                              cfg):
+
+    # 1) Load raw tables and artifacts
+    model = LOAD_MODEL(artifacts_dir)
+    train, oil, stores, items, holidays, promos = LOAD_FAVORITA_TABLES(cfg.paths)
+
+    # 2) Preprocess (same as modeling)
+    test = ext_train(test, stores, items)
+    oil   = FILL_OIL_MISSING(oil)
+    promos = FILL_PROMOS_MISSING(promos)
+    holidays = TIDY_HOLIDAYS(holidays)
+    df = JOIN_OIL_PROMOS_HOLIDAYS(test, oil, promos, holidays)
+
+    # 3) Select scoring horizon
+    df_scoring = SLICE_BY_DATE(df, scoring_period)                   # [t_min, t_max]
+
+    # 4) Build the SAME features with the SAME max_lag
+    function MAKE_FEATURES_SCORING(df_scoring, max_lag):
+        df_scoring = DATE_FEATURES(df_scoring)
+        df_scoring = HOLIDAY_FEATURES(df_scoring, holidays)
+        df_scoring = PROMO_FEATURES(df_scoring, promos)
+        df_scoring = LAG_FEATURES(df_scoring, lags=[7,14,28,...], max_lag=max_lag)     # uses only past
+        df_scoring = MOVING_FEATURES(df_scoring, windows=[7,14,28], past_only=true)
+        df_scoring = EXPANDING_FEATURES(df_scoring, min_periods=28, past_only=true)
+        return df_scoring
+
+    X = MAKE_FEATURES_SCORING(df_scoring, max_lag)
+    X = DROP_TARGET_COLS(X, cfg.cols.target)                          # no ground truth at forecast time
+
+    # 5) Predict
+    yhat = PREDICT(model, X, cfg.model)
