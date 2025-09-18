@@ -1,4 +1,5 @@
 import holidays_preproc as hp
+import Lags as lg
 
 def run_modeling_pipeline(cfg):
 
@@ -16,13 +17,14 @@ def run_modeling_pipeline(cfg):
     train = JOIN_OIL_PROMOS(ext_train, oil, promos) # Kuba
 
     # 4) Build features for a given dataset slice
-    def MAKE_FEATURES(df, max_lag):
+    def MAKE_FEATURES(df, target_col, lags=[7, 14, 28], rollag=[1], explag=[1], group_cols=None, windows=[7, 14, 28],
+                      rolling_stats=['mean', 'std', 'max', 'min', 'sum'], exp_stats=['mean', 'std', 'max', 'min', 'sum']):
         df = DATE_FEATURES(df) # Kuba
         # df = hp.merge_train(df, holidays, stores)
         df = PROMO_FEATURES(df, promos) # Kuba
-        df = LAG_FEATURES(df, lags = [7,14,28,...], max_lag = lags.max())   # uses shift(+) # Tomek
-        df = MOVING_FEATURES(df, windows = [7,14,28])  # shift(1) then rolling # TOmek
-        df = EXPANDING_FEATURES(df, min_periods = 28)  # closed='left' # Tomek
+        df = lg.make_lag(df, lag = lags, group_cols=group_cols, core_column=target_col) # max_lag = lag.max())   # uses shift(+) # Tomek
+        df = lg.make_rolling(df, rollag=rollag, window = windows, core_column=target_col, group_cols=group_cols, rolling_stats=rolling_stats)  # shift(1) then rolling # Tomek
+        df = lg.make_expanding(df, core_column=target_col, explag=explag, exp_stats=exp_stats, group_cols=group_cols)  # closed='left' # Tomek
         return df
 
     # 5) Time-series cross-validation windows
