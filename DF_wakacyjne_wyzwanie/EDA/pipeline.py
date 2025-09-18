@@ -1,25 +1,36 @@
+
 import holidays_preproc as hp
+from extend_train import create_extend_train, load_favorita_tables
+from handling_nan_values import fill_time_series_full_range, process_promotions_flexible
+from date_features import extract_comprehensive_date_features
+from promo_features import promo_features_all
 
 def run_modeling_pipeline(cfg):
 
-    # 1) Load raw tables
-    train, oil, stores, items, holidays, promos = LOAD_FAVORITA_TABLES(cfg.paths) # TODO
+        # 1) Load raw tables
+    dfs = load_favorita_tables(['train.csv', 'oil.csv', 'stores.csv', 'items.csv', 'holidays_events.csv'])
+    train = dfs['train']
+    oil = dfs['oil']
+    stores = dfs['stores']
+    items = dfs['items']
+    holidays = dfs['holidays_events']
+
 
     # 2) Preprocess (your functions)
-    ext_train = EXTEND_TRAIN(train, stores, items)       # City/State/FAMILY/Class #TODO
-    oil   = FILL_OIL_MISSING(oil)       # Kuba
-    promos = FILL_PROMOS_MISSING(promos) # Kuba
+    ext_train = create_extend_train(train, items, stores)    #KUBA   # City/State/FAMILY/Class #TODO
+    oil = fill_time_series_full_range(oil)
+    promos = process_promotions_flexible(promos, dataset_name="promos", strategy_for_missing_promo="nan")
     holidays = hp.preprocess(holidays)
 
     # 3) Join auxiliary tables into train
     train = hp.merge_train(train, holidays, stores)
-    train = JOIN_OIL_PROMOS(ext_train, oil, promos) # Kuba
+    train = JOIN_OIL_PROMOS(ext_train, oil, promos) # Kuba - chyba tego nie robiłem
 
     # 4) Build features for a given dataset slice
     def MAKE_FEATURES(df, max_lag):
-        df = DATE_FEATURES(df) # Kuba
+        df = extract_comprehensive_date_features(df) # Kuba
         # df = hp.merge_train(df, holidays, stores)
-        df = PROMO_FEATURES(df, promos) # Kuba
+        df = promo_features_all(df) # Kuba
         df = LAG_FEATURES(df, lags = [7,14,28,...], max_lag = lags.max())   # uses shift(+) # Tomek
         df = MOVING_FEATURES(df, windows = [7,14,28])  # shift(1) then rolling # TOmek
         df = EXPANDING_FEATURES(df, min_periods = 28)  # closed='left' # Tomek
