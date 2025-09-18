@@ -1,3 +1,6 @@
+import os
+import pandas as pd
+
 def create_extend_train(train, items, stores):
 	"""
 	Dołącza do DataFrame train cechy produktowe (family, class) oraz sklepowe (city, state).
@@ -33,24 +36,33 @@ def create_extend_train(train, items, stores):
 	# Zwracamy rozszerzony DataFrame
 	return train_ext
 
-# --- Funkcja do ładowania wszystkich zbiorów Favorita (bez chunków, pełne wczytanie) ---
-import pandas as pd
+# --- Funkcja do ładowania wszystkich zbiorów Favorita (pełne wczytanie) ---
 
-def load_favorita_tables(paths):
+def load_favorita_tables(csv_paths):
     """
-    Ładuje wszystkie podstawowe zbiory Favorita do DataFrame'ów.
+    Uniwersalna funkcja do ładowania dowolnych plików CSV do słownika DataFrame'ów.
+    Jeśli klucz/ścieżka zawiera 'train', ustawia optymalne dtypes.
 
-    Parameters
-    ----------
-    paths : dict lub Namespace
-        Słownik lub obiekt z atrybutami zawierającymi ścieżki do plików csv.
+    Parametry
+    ---------
+    csv_paths : dict lub list lub str
+        - dict: {nazwa: sciezka}
+        - list: lista ścieżek (nazwa = plik bez rozszerzenia)
+        - str: folder lub pojedynczy plik csv
 
     Returns
     -------
-    tuple
-        (train, oil, stores, items, holidays, promos, test, sample_submission, transactions)
-        Każdy element to pd.DataFrame lub None jeśli plik nie istnieje.
+    dict
+        Słownik {nazwa: DataFrame}
     """
+
+    train_dtypes = {
+        'store_nbr': 'int8',
+        'item_nbr': 'int32',
+        'unit_sales': 'float32',
+        'onpromotion': 'boolean'
+    }
+
     def try_read(path, **kwargs):
         try:
             return pd.read_csv(path, **kwargs)
@@ -58,14 +70,35 @@ def load_favorita_tables(paths):
             print(f"Nie udało się wczytać {path}: {e}")
             return None
 
-    train = try_read(paths.get('train', 'train.csv'), parse_dates=['date'])
-    oil = try_read(paths.get('oil', 'oil.csv'))
-    stores = try_read(paths.get('stores', 'stores.csv'))
-    items = try_read(paths.get('items', 'items.csv'))
-    holidays = try_read(paths.get('holidays', 'holidays_events.csv'))
-    promos = try_read(paths.get('promos', 'promos.csv'))
-    test = try_read(paths.get('test', 'test.csv'))
-    sample_submission = try_read(paths.get('sample_submission', 'sample_submission.csv'))
-    transactions = try_read(paths.get('transactions', 'transactions.csv'))
+    result = {}
 
-    return train, oil, stores, items, holidays, promos, test, sample_submission, transactions
+    if isinstance(csv_paths, dict):
+        items = csv_paths.items()
+    elif isinstance(csv_paths, list):
+        items = [(os.path.splitext(os.path.basename(p))[0], p) for p in csv_paths]
+    elif isinstance(csv_paths, str):
+        if os.path.isdir(csv_paths):
+            files = [f for f in os.listdir(csv_paths) if f.endswith('.csv')]
+            items = [(os.path.splitext(f)[0], os.path.join(csv_paths, f)) for f in files]
+        elif csv_paths.endswith('.csv'):
+            items = [(os.path.splitext(os.path.basename(csv_paths))[0], csv_paths)]
+        else:
+            raise ValueError('Podaj folder lub plik csv lub listę/ dict ścieżek')
+    else:
+        raise ValueError('csv_paths musi być dict, listą lub stringiem')
+
+    for name, path in items:
+        if 'train' in name:
+            df = try_read(path, dtype=train_dtypes, parse_dates=['date'])
+        else:
+            df = try_read(path)
+        result[name] = df
+
+    return result
+
+
+# dfs = load_favorita_tables(['train.csv', 'oil.csv', 'stores.csv'])
+# # lub
+# dfs = load_favorita_tables({'train': 'train.csv', 'oil': 'oil.csv'})
+# # lub
+# dfs = load_favorita_tables('C:/ścieżka/do/folderu_z_csv')
