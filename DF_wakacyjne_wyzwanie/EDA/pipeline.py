@@ -29,7 +29,8 @@ def run_modeling_pipeline(cfg):
 
     # 4) Build features for a given dataset slice
     def MAKE_FEATURES(df, target_col, lags=[7, 14, 28], rollag=[1], explag=[1], group_cols=None, windows=[7, 14, 28],
-                      rolling_stats=['mean', 'std', 'max', 'min', 'sum'], exp_stats=['mean', 'std', 'max', 'min', 'sum']):
+                      rolling_stats=['mean', 'std', 'max', 'min', 'sum'],
+                      exp_stats=['mean', 'std', 'max', 'min', 'sum']):
         df = extract_comprehensive_date_features(df) # Kuba
         # df = hp.merge_train(df, holidays, stores)
         df = promo_features_all(df) # Kuba
@@ -39,13 +40,26 @@ def run_modeling_pipeline(cfg):
 
         return df
 
+
+    def compute_frozen_days_from_max_lag(max_lag, max_window):
+        return int(max_lag + max_window - 1)
+
+
+    def unique_dates(df):
+        return df['date'].unique()
+
+
+    def build_rolling_windows(full_dates, n_windows, val_size, stride, embargo, min_tain_days):
+        return
+
+
     # 5) Time-series cross-validation windows
     max_lag = 365
     validation_windows = 3
     size_of_validation_windows = 14
-    frozen_days = COMPUTE_FROZEN_DAYS_FROM_MAX_LAG(max_lag)          # often == max_lag # TODO
-    windows = BUILD_ROLLING_WINDOWS(    # TODO
-                 full_dates = UNIQUE_DATES(train.date),  # TODO
+    frozen_days = compute_frozen_days_from_max_lag(max_lag)          # often == max_lag
+    windows = build_rolling_windows(    # TODO
+                 full_dates = unique_dates(train.date),
                  n_windows = validation_windows,
                  val_size = size_of_validation_windows,
                  stride = cfg.cv.stride_days,
