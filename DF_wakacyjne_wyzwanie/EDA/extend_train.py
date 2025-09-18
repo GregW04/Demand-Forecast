@@ -32,3 +32,40 @@ def create_extend_train(train, items, stores):
 
 	# Zwracamy rozszerzony DataFrame
 	return train_ext
+
+# --- Funkcja do ładowania wszystkich zbiorów Favorita (bez chunków, pełne wczytanie) ---
+import pandas as pd
+
+def load_favorita_tables(paths):
+    """
+    Ładuje wszystkie podstawowe zbiory Favorita do DataFrame'ów.
+
+    Parameters
+    ----------
+    paths : dict lub Namespace
+        Słownik lub obiekt z atrybutami zawierającymi ścieżki do plików csv.
+
+    Returns
+    -------
+    tuple
+        (train, oil, stores, items, holidays, promos, test, sample_submission, transactions)
+        Każdy element to pd.DataFrame lub None jeśli plik nie istnieje.
+    """
+    def try_read(path, **kwargs):
+        try:
+            return pd.read_csv(path, **kwargs)
+        except Exception as e:
+            print(f"Nie udało się wczytać {path}: {e}")
+            return None
+
+    train = try_read(paths.get('train', 'train.csv'), parse_dates=['date'])
+    oil = try_read(paths.get('oil', 'oil.csv'))
+    stores = try_read(paths.get('stores', 'stores.csv'))
+    items = try_read(paths.get('items', 'items.csv'))
+    holidays = try_read(paths.get('holidays', 'holidays_events.csv'))
+    promos = try_read(paths.get('promos', 'promos.csv'))
+    test = try_read(paths.get('test', 'test.csv'))
+    sample_submission = try_read(paths.get('sample_submission', 'sample_submission.csv'))
+    transactions = try_read(paths.get('transactions', 'transactions.csv'))
+
+    return train, oil, stores, items, holidays, promos, test, sample_submission, transactions
