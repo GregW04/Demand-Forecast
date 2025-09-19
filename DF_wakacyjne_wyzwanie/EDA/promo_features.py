@@ -142,3 +142,13 @@ def add_promo_next_7days_flag(df, group_cols=['store_nbr', 'item_nbr'], date_col
         # Jeśli w oknie pojawi się choć jedna promocja, ustawiamy flagę True
     df_sorted['promo_in_next_7days'] = future_promo['future_promo'] > 0
     return df_sorted
+
+
+def promo_features_all(df: pd.DataFrame):
+    df = add_days_since_last_promo_fast(df)
+    df = add_days_until_next_promo(df)
+    df = add_promo_streak(df)
+    df = add_promo_next_7days_flag(df)
+    return df
+
+

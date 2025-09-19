@@ -3,6 +3,10 @@ import numpy as np
 import re
 from unidecode import unidecode
 from functools import reduce
+import gc
+
+# Enable pandas' copy-on-write mode to reduce unnecessary data copies during operations
+pd.options.mode.copy_on_write = True
 
 
 def clean(holidays: pd.DataFrame) -> pd.DataFrame:
@@ -225,7 +229,7 @@ def preprocess(holidays: pd.DataFrame) -> pd.DataFrame:
     Preprocessing of holiday_events.
 
     Parameters:
-    - holidays: DataFrame holiday_events.csv
+    - holidays: DataFrame holiday_events.csv (must be preprocessesd)
 
     Result collumns:
     - date: date
@@ -249,114 +253,146 @@ def preprocess(holidays: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def merge_train(train: pd.DataFrame, 
-                holidays: pd.DataFrame, 
+def merge_train(train: pd.DataFrame,
+                holidays: pd.DataFrame,
                 stores: pd.DataFrame) -> pd.DataFrame:
     """
-    Merge training data with store metadata and holiday signals at multiple scopes
-    (national, regional, local), and compute aggregated holiday features.
+    Merge training data with holiday signals at three scopes (national / regional / local)
+    in a memory-efficient way: small dtypes (UInt8), proper merge/groupby keys,
+    minimal copies, and no float64 expansions.
 
-    Parameters
-    ----------
-    train : pd.DataFrame
-        One row per store/date. Must include at least ['store_nbr', 'date', ...].
-    holidays : pd.DataFrame
-        Raw holiday calendar. After preprocess(holidays), it is expected to contain:
-        - 'date' (datetime), 'scope' (e.g., 'national', 'regional', 'local'),
-          'anchor_key' (identifier for a holiday event/window),
-          'is_holiday' (bool), 
-          'holiday_duration' (int),
-          'is_day_off' (bool),
-          'is_event' (bool),
-          and optionally location fields used by scopes (e.g., 'state', 'city').
-    stores : pd.DataFrame
-        Store reference with at least ['store_nbr', 'city', 'state'].
-
-    Returns
-    -------
-    pd.DataFrame
-        The original train columns plus aggregated holiday features:
-        ['is_holiday', 'holiday_duration', 'is_day_off', 'is_event'].
-        Scope-specific columns are not retained in the final output.
+    Returns the original training columns plus 4 holiday-related features:
+      - is_holiday (UInt8: 0/1)
+      - holiday_duration (UInt8: number of days, max across scopes)
+      - is_day_off (UInt8: 0/1)
+      - is_event (UInt8: 0/1)
     """
+    # Work on a shallow copy so we don't mutate the caller's DataFrame
     train = train.copy()
-    cols = list(train.columns)
+    # Keep the original column list; we will return only these plus the 4 new features
+    base_cols = list(train.columns)
+
+    # Parse dates and downcast numeric dtypes to save memory in train
     train["date"] = pd.to_datetime(train["date"])
-    holidays = preprocess(holidays)
+    train["store_nbr"] = pd.to_numeric(train["store_nbr"], downcast="integer")
+    if "item_nbr" in train:
+        train["item_nbr"] = pd.to_numeric(train["item_nbr"], downcast="integer")
+    if "unit_sales" in train:
+        train["unit_sales"] = pd.to_numeric(train["unit_sales"], downcast="float")
+    if "onpromotion" in train:
+        # float32 keeps memory low; NaN can be represented if present
+        train["onpromotion"] = train["onpromotion"].astype("float32")
 
-    # Attach store-level geography so we can join regional/local holidays
-    train = train.merge(
-        stores[["store_nbr","city","state"]], 
-        on="store_nbr", how="left"
-    )
-
-    # Join keys per scope:
-    # - national: only date matters
-    # - regional: date + state
-    # - local:    date + city
-    scopes = {
-        "nat":  ["date"],
-        "reg":  ["date", "state"],
-        "loc":  ["date", "city"]
-    }
-
-    # Holiday attributes we want to bring in from the calendar for each scope
-    base_cols = [
-        "date","anchor_key","is_holiday",
-        "holiday_duration","is_day_off", "is_event"
-    ]
-
-    for suffix, merge_keys in scopes.items():
-        # Keep only rows that belong to the current scope (e.g., 'national', 'regional', 'local')
-        sub_holidays = holidays[holidays.scope.str.lower().str.startswith(suffix)]
-
-        # Avoid duplicate columns
-        merge_cols = base_cols + [c for c in merge_keys if c not in base_cols]
-
-        # Merge scope-specific holiday features.
-        # drop_duplicates guards against many-to-many merges due to duplicate calendar rows.
+    # Ensure city/state are present in train; if missing, bring them from stores
+    if not {"city", "state"}.issubset(train.columns):
         train = train.merge(
-            sub_holidays[merge_cols].drop_duplicates(),
-            on=merge_keys, how="left", suffixes=("","_" + suffix)
+            stores[["store_nbr", "city", "state"]],
+            on="store_nbr",
+            how="left",
+            sort=False,       # keep current row order
+            copy=False,       # rely on copy-on-write to avoid allocating a new block
+            validate="m:1",   # many train rows per one store row
         )
 
-        # Rename the merged columns to include the scope suffix so they don't collide across scopes.
-        train.rename(columns={
-            "is_holiday": f"is_holiday_{suffix}",
-            "holiday_duration": f"holiday_duration_{suffix}",
-            "anchor_key": f"anchor_key_{suffix}",
-            "is_day_off": f"is_day_off_{suffix}",
-            "is_event": f"is_event_{suffix}",
-        }, inplace=True)
+    # Convert object-typed categoricals to 'category' to reduce memory usage
+    for c in ("family", "city", "state"):
+        if c in train.columns and train[c].dtype == "object":
+            train[c] = train[c].astype("category")
 
-    # Aggregate across scopes:
-    # - is_event: true if any scope marks the date as event
-    train["is_event"] = (
-        train[[f"is_event_{s}" for s in scopes]]
-        .fillna(False).any(axis=1)
-    )
+    # Prepare a lean holidays table with only needed columns and compact dtypes
+    H = holidays[[
+        "date", "scope", "city", "state",
+        "is_holiday", "is_event", "is_day_off", "holiday_duration"
+    ]].copy()
+    H["date"] = pd.to_datetime(H["date"])
+    for c in ("city", "state"):
+        if c in H.columns and H[c].dtype == "object":
+            H[c] = H[c].astype("category")
 
-    # Aggregate across scopes:
-    # - is_holiday: true if any scope marks the date as holiday
-    train["is_holiday"] = (
-        train[[f"is_holiday_{s}" for s in scopes]]
-        .fillna(False).any(axis=1)
-    )
+    # Use pandas' nullable Boolean for flags in H; duration fits in an unsigned byte
+    H["is_holiday"] = H["is_holiday"].astype("boolean")
+    H["is_event"] = H["is_event"].astype("boolean")
+    H["is_day_off"] = H["is_day_off"].astype("boolean")
+    H["holiday_duration"] = H["holiday_duration"].fillna(0).astype("UInt8")
 
-    # - holiday_duration: take the maximum duration among scopes (0 if none)
-    train["holiday_duration"] = (
-        train[[f"holiday_duration_{s}" for s in scopes]]
-        .fillna(0).max(axis=1)
-    )
+    # Define merge keys per scope
+    scopes = {
+        "nat": ["date"],           # National scope: keyed by date only
+        "reg": ["date", "state"],  # Regional scope: keyed by date and state
+        "loc": ["date", "city"],   # Local scope: keyed by date and city
+    }
+    scope_map = {"nat": "national", "reg": "regional", "loc": "local"}
 
-    # - is_day_off: true if any scope indicates a day off
-    train["is_day_off"] = (
-        train[[f"is_day_off_{s}" for s in scopes]]
-        .fillna(False).any(axis=1)
-    )
+    # Collect columns added per scope so we can drop them later
+    scoped_cols = []
 
-    # Return the original columns plus aggregated holiday features.
-    # Scope-specific columns are intentionally dropped to keep the output tidy.
-    cols.extend(["is_holiday", "holiday_duration", 
-                 "is_day_off", "is_event"])
-    return train[cols].reset_index(drop=True)
+    for sfx, keys in scopes.items():
+        scope_name = scope_map[sfx]
+        # Filter holidays by scope (case-insensitive)
+        sub = H[H["scope"].str.lower() == scope_name]
+
+        if sub.empty:
+            continue
+
+        # Aggregate per key; observed=True avoids generating unused category combinations
+        sub_agg = (
+            sub.groupby(keys, observed=True).agg(
+                is_holiday=("is_holiday", "max"),        # logical OR for booleans via max
+                is_event=("is_event", "max"),
+                is_day_off=("is_day_off", "max"),
+                holiday_duration=("holiday_duration", "max"),  # take max duration if overlaps
+            )
+            .reset_index()
+        )
+
+        # Cast flags to UInt8 (0/1) and ensure no NaNs
+        for b in ("is_holiday", "is_event", "is_day_off"):
+            sub_agg[b] = sub_agg[b].fillna(False).astype("UInt8")
+        sub_agg["holiday_duration"] = sub_agg["holiday_duration"].fillna(0).astype("UInt8")
+
+        # Many-to-one merge from train to aggregated holidays for this scope
+        train = train.merge(
+            sub_agg, on=keys, how="left", sort=False, copy=False, validate="m:1"
+        )
+
+        # Suffix new columns with the scope short code; fill NaNs to avoid float upcast
+        rename = {c: f"{c}_{sfx}" for c in ("is_holiday", "is_event", "is_day_off", "holiday_duration")}
+        train.rename(columns=rename, inplace=True)
+        new_cols = list(rename.values())
+
+        for c in new_cols:
+            # All of these are small integers: binary flags or a small day count
+            train[c] = train[c].fillna(0).astype("UInt8")
+
+        scoped_cols.extend(new_cols)
+
+        # Proactively free temporary objects to keep peak memory low
+        del sub_agg, sub
+        gc.collect()
+
+    # Helper to safely fetch a column as UInt8; returns a zero-filled series if missing
+    def get_series(name: str) -> pd.Series:
+        if name in train.columns:
+            # already UInt8 without NaN
+            return train[name].astype("UInt8")
+        return pd.Series(0, index=train.index, dtype="UInt8")
+
+    # Combine flags across scopes via bitwise OR; result stays in UInt8 (0/1)
+    train["is_event"] = (get_series("is_event_nat") | get_series("is_event_reg") | get_series("is_event_loc")).astype("UInt8")
+    train["is_holiday"] = (get_series("is_holiday_nat") | get_series("is_holiday_reg") | get_series("is_holiday_loc")).astype("UInt8")
+    train["is_day_off"] = (get_series("is_day_off_nat") | get_series("is_day_off_reg") | get_series("is_day_off_loc")).astype("UInt8")
+
+    # Take the maximum holiday_duration across scopes
+    hd = get_series("holiday_duration_nat")
+    hd = np.maximum(hd, get_series("holiday_duration_reg")).astype("UInt8")
+    hd = np.maximum(hd, get_series("holiday_duration_loc")).astype("UInt8")
+    train["holiday_duration"] = hd
+
+    # Drop per-scope intermediate columns; the combined features are now in place
+    if scoped_cols:
+        train.drop(columns=[c for c in scoped_cols if c in train.columns], inplace=True)
+
+    # Return only the original columns plus the 4 final holiday features
+    out_cols = base_cols + ["is_holiday", "holiday_duration", "is_day_off", "is_event"]
+    return train[out_cols].reset_index(drop=True)
+
