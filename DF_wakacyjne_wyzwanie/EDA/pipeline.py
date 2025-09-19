@@ -32,7 +32,6 @@ def run_modeling_pipeline(cfg):
                       rolling_stats=['mean', 'std', 'max', 'min', 'sum'],
                       exp_stats=['mean', 'std', 'max', 'min', 'sum']):
         df = extract_comprehensive_date_features(df) # Kuba
-        # df = hp.merge_train(df, holidays, stores)
         df = promo_features_all(df) # Kuba
         df = lg.make_lag(df, lag = lags, group_cols=group_cols, core_column=target_col) # max_lag = lag.max())   # uses shift(+) # Tomek
         df = lg.make_rolling(df, rollag=rollag, window = windows, core_column=target_col, group_cols=group_cols, rolling_stats=rolling_stats)  # shift(1) then rolling # Tomek
@@ -42,24 +41,65 @@ def run_modeling_pipeline(cfg):
 
 
     def compute_frozen_days_from_max_lag(max_lag, max_window):
+        """
+        :param max_lag: maksymalny lag
+        :param max_window: maksymalne okno (potrzebne do obliczania make_rolling) aby w trainie nie było informacji,
+                           które zostały użyte do make_rolling
+        :return: int
+        """
+
         return int(max_lag + max_window - 1)
 
 
     def unique_dates(df):
+        """
+        :param df: tabela
+        :return: Macierz jednowymiarowa, która zawiera w sobie daty w formie stringa.
+        """
         return df['date'].unique()
 
 
-    def build_rolling_windows(full_dates, n_windows, val_size, stride, embargo, min_tain_days):
-        return
+    def build_rolling_windows(full_dates, n_windows, val_size, stride, embargo, min_train_days):
+        """
+        :param full_dates: wszystkie daty w datasecie
+        :param n_windows: ilość okien
+        :param val_size: wielkość zbioru walidacyjnego
+        :param stride: krok między zbiorami walidacyjnymi (jeżeli chcemy niezależne zbiory walidacyjne to
+                        stride = val_size, większy odstęp między zbiorami lub zbiory nachodzące na siebie    <------------ jak się mylę to mnie poprawcie xd
+                        to odpowiednio stride > val_size, stride < val_size)
+        :param embargo: wielkość zamrożonego  część zbioru
+        :param min_train_days: minimalna ilość dni w zbiorze treningowym
+        :return: lista krotek z datą jako string np. [((train_start, train_end), (val_start, val_end)), ...] poustawiane od
+                największego zbioru treningowego do najmniejszego
+        """
+        windows = []
+        n_dates = len(full_dates)
+
+        train_start = 0  # chcemy aby trening zawsze odbywał się od początku datasetu, tylko końcówkę ukracamy
+        for i in range(n_windows):
+            val_end = n_dates - i * stride
+            val_start = val_end - val_size
+            train_end = val_start - embargo
+
+            if train_end < min_train_days:
+                print(f'Zbiór treningowy za mały przy {i + 1} zbiorze walidacyjnym ')
+                break
+
+            train_range = (full_dates[train_start], full_dates[train_end])
+            val_range = (full_dates[val_start], full_dates[val_end])
+            windows.append((train_range, val_range))
+
+        return windows
 
 
     # 5) Time-series cross-validation windows
     max_lag = 365
+    max_window = 30
     validation_windows = 3
     size_of_validation_windows = 14
-    frozen_days = compute_frozen_days_from_max_lag(max_lag)          # often == max_lag
+    frozen_days = compute_frozen_days_from_max_lag(max_lag, max_window)          # often == max_lag
     windows = build_rolling_windows(    # TODO
-                 full_dates = unique_dates(train.date),
+                 full_dates = unique_dates(train),
                  n_windows = validation_windows,
                  val_size = size_of_validation_windows,
                  stride = cfg.cv.stride_days,
