@@ -5,12 +5,15 @@ from extend_train import create_extend_train, load_favorita_tables
 from handling_nan_values import fill_time_series_full_range, process_promotions_flexible, fill_oil_pchip
 from date_features import extract_comprehensive_date_features
 from promo_features import promo_features_all
+from JOIN_OIL_PROMOS import JOIN_OIL_PROMOS
+from types import SimpleNamespace
+
 
 def run_modeling_pipeline(cfg):
 
-    # 1) Load raw tables
+     # 1) Load raw tables
     print('1) Load raw tables')
-    dfs = load_favorita_tables(['train.csv', 'oil.csv', 'stores.csv', 'items.csv', 'holidays_events.csv'])
+    dfs = load_favorita_tables(cfg.paths)
     train = dfs['train']
     oil = dfs['oil']
     stores = dfs['stores']
@@ -28,14 +31,18 @@ def run_modeling_pipeline(cfg):
 
     # 3) Join auxiliary tables into train
     print('3) Join auxiliary tables into train')
+
+    print('join holidays')
     train = hp.merge_train(train, holidays, stores)
-    train = JOIN_OIL_PROMOS(train, oil, promos) # Kuba - chyba tego nie robiłem
+
+    print('join oil promos')
+    train = JOIN_OIL_PROMOS(train, oil, promos)
 
     # 4) Build features for a given dataset slice
     print('4) Build features for a given dataset slice')
     def MAKE_FEATURES(df, target_col, lags=[7, 14, 28], rollag=[1], explag=[1], group_cols=None, windows=[7, 14, 28],
-                      rolling_stats=['mean', 'std', 'max', 'min', 'sum'],
-                      exp_stats=['mean', 'std', 'max', 'min', 'sum']):
+                        rolling_stats=['mean', 'std', 'max', 'min', 'sum'],
+                        exp_stats=['mean', 'std', 'max', 'min', 'sum']):
         df = extract_comprehensive_date_features(df) # Kuba
         df = promo_features_all(df) # Kuba
         df = lg.make_lag(df, lag = lags, group_cols=group_cols, core_column=target_col) # max_lag = lag.max())   # uses shift(+) # Tomek
@@ -49,7 +56,7 @@ def run_modeling_pipeline(cfg):
         """
         :param max_lag: maksymalny lag
         :param max_window: maksymalne okno (potrzebne do obliczania make_rolling) aby w trainie nie było informacji,
-                           które zostały użyte do make_rolling
+                            które zostały użyte do make_rolling
         :return: int
         """
 
@@ -96,7 +103,6 @@ def run_modeling_pipeline(cfg):
 
         return windows
 
-
     # 5) Time-series cross-validation windows
     print('5) Time-series cross-validation windows')
     max_lag = 365
@@ -105,12 +111,12 @@ def run_modeling_pipeline(cfg):
     size_of_validation_windows = 14
     frozen_days = compute_frozen_days_from_max_lag(max_lag, max_window)          # often == max_lag
     windows = build_rolling_windows(    # TODO
-                 full_dates = unique_dates(train),
-                 n_windows = validation_windows,
-                 val_size = size_of_validation_windows,
-                 stride = cfg.cv.stride_days,
-                 embargo = frozen_days,
-                 min_train_days = cfg.cv.min_train_days)
+                    full_dates = unique_dates(train),
+                    n_windows = validation_windows,
+                    val_size = size_of_validation_windows,
+                    stride = cfg.cv.stride_days,
+                    embargo = frozen_days,
+                    min_train_days = cfg.cv.min_train_days)
 
     fold_scores = []
     models_per_fold = []
@@ -148,4 +154,27 @@ def run_modeling_pipeline(cfg):
 
 
 
-run_modeling_pipeline('yes')
+cfg = SimpleNamespace(
+    paths=['train.csv', 'oil.csv', 'stores.csv', 'items.csv', 'holidays_events.csv'],
+    cv=SimpleNamespace(
+        stride_days=14,     # validation window shift step (days)
+        min_train_days=730  # minimum length of post-embargo history (days)
+    ),
+    cols=SimpleNamespace(
+        target="unit_sales" # the name of the target column
+    ),
+    model=SimpleNamespace(
+        framework="lightgbm",   # "lightgbm" / "xgboost", used in TRAIN_MODEL
+        params=dict(
+            n_estimators=1000,
+            learning_rate=0.05,
+            num_leaves=31,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=42,
+        )
+    )
+)
+
+
+run_modeling_pipeline(cfg)
