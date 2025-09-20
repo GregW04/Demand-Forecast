@@ -97,8 +97,8 @@ def run_modeling_pipeline(cfg):
                 print(f'Zbiór treningowy za mały przy {i + 1} zbiorze walidacyjnym ')
                 break
 
-            train_range = (full_dates[train_start], full_dates[train_end])
-            val_range = (full_dates[val_start], full_dates[val_end])
+            train_range = (full_dates[train_start], full_dates[train_end-1])
+            val_range = (full_dates[val_start], full_dates[val_end-1])
             windows.append((train_range, val_range))
 
         return windows
