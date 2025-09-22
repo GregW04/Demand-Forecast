@@ -95,3 +95,44 @@ def build_rolling_windows(full_dates: np.ndarray,
         windows.append((train_range, val_range))
 
     return windows
+
+
+def SLICE_BY_DATE(df: pd.DataFrame,
+                  date_range,
+                  copy: bool = True) -> pd.DataFrame:
+    """
+    Slice DataFrame by inclusive date range [start, end].
+    - date_range: tuple/list of two elements (start, end); any string-like is parsed via pd.to_datetime
+    - copy: if True, returns a copy to avoid chained assignment warnings
+    """
+    if "date" not in df.columns:
+        raise ValueError("SLICE_BY_DATE: 'date' column is required in df.")
+
+    if not isinstance(date_range, (list, tuple)) or len(date_range) != 2:
+        raise ValueError("SLICE_BY_DATE: date_range must be a list/tuple of (start, end).")
+
+    start, end = date_range
+    start = pd.to_datetime(start)
+    end = pd.to_datetime(end)
+    if start > end:
+        start, end = end, start  # ensure start <= end
+
+    # Build mask using a local datetime-converted series (does not mutate original df)
+    date_vals = pd.to_datetime(df["date"]) if not pd.api.types.is_datetime64_any_dtype(df["date"]) else df["date"]
+    mask = (date_vals >= start) & (date_vals <= end)
+
+    result = df.loc[mask]
+    return result.copy() if copy else result
+
+
+def DROP_TARGET_COLS(df: pd.DataFrame,
+                     target_col: str,
+                     copy: bool = False) -> pd.DataFrame:
+    """
+    Drop target column from feature frame (no error if the column is absent).
+    - target_col: name of the target column to drop
+    - copy: if True, returns a copy after dropping
+    """
+    result = df.drop(columns=[target_col], errors="ignore")
+    return result.copy() if copy else result
+

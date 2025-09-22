@@ -9,6 +9,8 @@ from features_block import (
     compute_frozen_days_from_max_lag,
     unique_dates,
     build_rolling_windows,
+    SLICE_BY_DATE,
+    DROP_TARGET_COLS
 )
 
 from types import SimpleNamespace
@@ -92,13 +94,13 @@ def run_modeling_pipeline(cfg):
     # 6) Cross-validation loop
     print('6) Cross-validation loop')
     for (train_range, val_range) in windows:
-        tr = SLICE_BY_DATE(train, train_range) # TODO
+        tr = SLICE_BY_DATE(train, train_range)
         va = SLICE_BY_DATE(train, val_range)
 
-        Xtr = MAKE_FEATURES(tr, target_col=cfg.cols.target)
-        Xva = MAKE_FEATURES(va, target_col=cfg.cols.target)
+        Xtr = MAKE_FEATURES(tr, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols)
+        Xva = MAKE_FEATURES(va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols)
 
-        y_tr = Xtr[cfg.cols.target];  Xtr = DROP_TARGET_COLS(Xtr, cfg.cols.target) # TODO
+        y_tr = Xtr[cfg.cols.target];  Xtr = DROP_TARGET_COLS(Xtr, cfg.cols.target)
         y_va = Xva[cfg.cols.target];  Xva = DROP_TARGET_COLS(Xva, cfg.cols.target)
 
         model = TRAIN_MODEL(Xtr, y_tr, Xva, y_va, cfg.model)         # LightGBM / XGBoost + early stop
@@ -129,7 +131,8 @@ cfg = SimpleNamespace(
         min_train_days=365   # was 730  # shorter minimal training length
     ),
     cols=SimpleNamespace(
-        target="unit_sales"
+        target="unit_sales",
+        group_cols=["store_nbr", "item_nbr"]  # group keys for lag/rolling/expanding
     ),
     model=SimpleNamespace(
         framework="lightgbm",
