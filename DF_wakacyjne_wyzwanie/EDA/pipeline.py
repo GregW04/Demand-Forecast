@@ -3,18 +3,24 @@ import holidays_preproc as hp
 import Lags as lg
 from extend_train import create_extend_train, load_favorita_tables
 from handling_nan_values import fill_time_series_full_range, process_promotions_flexible, fill_oil_pchip
-from date_features import extract_comprehensive_date_features
-from promo_features import promo_features_all
 from JOIN_OIL_PROMOS import JOIN_OIL_PROMOS
+from features_block import (
+    MAKE_FEATURES,
+    compute_frozen_days_from_max_lag,
+    unique_dates,
+    build_rolling_windows,
+)
+
 from types import SimpleNamespace
 
 
 def run_modeling_pipeline(cfg):
 
-     # 1) Load raw tables
+    # 1) Load raw tables
     print('1) Load raw tables')
     dfs = load_favorita_tables(cfg.paths)
     train = dfs['train']
+    train = train[:31000000] # sample - TO BE DELETED !
     oil = dfs['oil']
     stores = dfs['stores']
     items = dfs['items']
@@ -40,76 +46,34 @@ def run_modeling_pipeline(cfg):
 
     # 4) Build features for a given dataset slice
     print('4) Build features for a given dataset slice')
-    def MAKE_FEATURES(df, target_col, lags=[7, 14, 28], rollag=[1], explag=[1], group_cols=None, windows=[7, 14, 28],
-                        rolling_stats=['mean', 'std', 'max', 'min', 'sum'],
-                        exp_stats=['mean', 'std', 'max', 'min', 'sum']):
-        df = extract_comprehensive_date_features(df) # Kuba
-        df = promo_features_all(df) # Kuba
-        df = lg.make_lag(df, lag = lags, group_cols=group_cols, core_column=target_col) # max_lag = lag.max())   # uses shift(+) # Tomek
-        df = lg.make_rolling(df, rollag=rollag, window = windows, core_column=target_col, group_cols=group_cols, rolling_stats=rolling_stats)  # shift(1) then rolling # Tomek
-        df = lg.make_expanding(df, core_column=target_col, explag=explag, exp_stats=exp_stats, group_cols=group_cols)  # closed='left' # Tomek
-
-        return df
-
-
-    def compute_frozen_days_from_max_lag(max_lag, max_window):
-        """
-        :param max_lag: maksymalny lag
-        :param max_window: maksymalne okno (potrzebne do obliczania make_rolling) aby w trainie nie było informacji,
-                            które zostały użyte do make_rolling
-        :return: int
-        """
-
-        return int(max_lag + max_window - 1)
-
-
-    def unique_dates(df):
-        """
-        :param df: tabela
-        :return: Macierz jednowymiarowa, która zawiera w sobie daty w formie stringa.
-        """
-        return df['date'].unique()
-
-
-    def build_rolling_windows(full_dates, n_windows, val_size, stride, embargo, min_train_days):
-        """
-        :param full_dates: wszystkie daty w datasecie
-        :param n_windows: ilość okien
-        :param val_size: wielkość zbioru walidacyjnego
-        :param stride: krok między zbiorami walidacyjnymi (jeżeli chcemy niezależne zbiory walidacyjne to
-                        stride = val_size, większy odstęp między zbiorami lub zbiory nachodzące na siebie    <------------ jak się mylę to mnie poprawcie xd
-                        to odpowiednio stride > val_size, stride < val_size)
-        :param embargo: wielkość zamrożonego  część zbioru
-        :param min_train_days: minimalna ilość dni w zbiorze treningowym
-        :return: lista krotek z datą jako string np. [((train_start, train_end), (val_start, val_end)), ...] poustawiane od
-                największego zbioru treningowego do najmniejszego
-        """
-        windows = []
-        n_dates = len(full_dates)
-
-        train_start = 0  # chcemy aby trening zawsze odbywał się od początku datasetu, tylko końcówkę ukracamy
-        for i in range(n_windows):
-            val_end = n_dates - i * stride
-            val_start = val_end - val_size
-            train_end = val_start - embargo
-
-            if train_end < min_train_days:
-                print(f'Zbiór treningowy za mały przy {i + 1} zbiorze walidacyjnym ')
-                break
-
-            train_range = (full_dates[train_start], full_dates[train_end-1])
-            val_range = (full_dates[val_start], full_dates[val_end-1])
-            windows.append((train_range, val_range))
-
-        return windows
+    # Moved to features_block.py
 
     # 5) Time-series cross-validation windows
     print('5) Time-series cross-validation windows')
-    max_lag = 365
-    max_window = 30
+    # [CHANGE] Tune window parameters so at least one CV window can be built
+    max_lag = 84        # was 365  # shorter max lag → smaller embargo
+    max_window = 14     # was 30   # smaller rolling window → smaller embargo
     validation_windows = 3
     size_of_validation_windows = 14
     frozen_days = compute_frozen_days_from_max_lag(max_lag, max_window)          # often == max_lag
+
+    # [DEBUG] Check window feasibility before building windows
+    full_dates = unique_dates(train)
+    n_dates = len(full_dates)
+    val_size = size_of_validation_windows
+    embargo = frozen_days
+    min_train = cfg.cv.min_train_days
+
+    print('Old debug info:')
+    print(f"[DEBUG] n_dates={n_dates}, min_train_days={min_train}, embargo={embargo}, val_size={val_size}")
+    print(f"[DEBUG] required_min_dates={min_train + embargo + val_size}")
+    print(f"[DEBUG] feasibility={n_dates >= (min_train + embargo + val_size)}")
+
+    print('New debug info:')
+    print(f"[DEBUG] n_dates={len(full_dates)}, min_train_days={cfg.cv.min_train_days}, "
+        f"embargo={compute_frozen_days_from_max_lag(max_lag, max_window)}, val_size={size_of_validation_windows}")
+    print(f"[DEBUG] required_min_dates={cfg.cv.min_train_days + compute_frozen_days_from_max_lag(max_lag, max_window) + size_of_validation_windows}")
+
     windows = build_rolling_windows(    # TODO
                     full_dates = unique_dates(train),
                     n_windows = validation_windows,
@@ -121,14 +85,18 @@ def run_modeling_pipeline(cfg):
     fold_scores = []
     models_per_fold = []
 
+    print('Built windows:')
+    print(windows)
+    print(f"Total windows: {len(windows)}")
+
     # 6) Cross-validation loop
     print('6) Cross-validation loop')
     for (train_range, val_range) in windows:
         tr = SLICE_BY_DATE(train, train_range) # TODO
         va = SLICE_BY_DATE(train, val_range)
 
-        Xtr = MAKE_FEATURES(tr, max_lag)
-        Xva = MAKE_FEATURES(va, max_lag)
+        Xtr = MAKE_FEATURES(tr, target_col=cfg.cols.target)
+        Xva = MAKE_FEATURES(va, target_col=cfg.cols.target)
 
         y_tr = Xtr[cfg.cols.target];  Xtr = DROP_TARGET_COLS(Xtr, cfg.cols.target) # TODO
         y_va = Xva[cfg.cols.target];  Xva = DROP_TARGET_COLS(Xva, cfg.cols.target)
@@ -157,14 +125,14 @@ def run_modeling_pipeline(cfg):
 cfg = SimpleNamespace(
     paths=['train.csv', 'oil.csv', 'stores.csv', 'items.csv', 'holidays_events.csv'],
     cv=SimpleNamespace(
-        stride_days=14,     # validation window shift step (days)
-        min_train_days=730  # minimum length of post-embargo history (days)
+        stride_days=14,      # validation window shift step (days)
+        min_train_days=365   # was 730  # shorter minimal training length
     ),
     cols=SimpleNamespace(
-        target="unit_sales" # the name of the target column
+        target="unit_sales"
     ),
     model=SimpleNamespace(
-        framework="lightgbm",   # "lightgbm" / "xgboost", used in TRAIN_MODEL
+        framework="lightgbm",
         params=dict(
             n_estimators=1000,
             learning_rate=0.05,
