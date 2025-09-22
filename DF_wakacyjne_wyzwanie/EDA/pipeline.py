@@ -12,6 +12,7 @@ from features_block import (
     SLICE_BY_DATE,
     DROP_TARGET_COLS
 )
+from feature_checks import check_features_quick
 
 from types import SimpleNamespace
 
@@ -93,12 +94,16 @@ def run_modeling_pipeline(cfg):
 
     # 6) Cross-validation loop
     print('6) Cross-validation loop')
-    for (train_range, val_range) in windows:
+    for fold_idx, (train_range, val_range) in enumerate(windows):
         tr = SLICE_BY_DATE(train, train_range)
         va = SLICE_BY_DATE(train, val_range)
 
         Xtr = MAKE_FEATURES(tr, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols)
         Xva = MAKE_FEATURES(va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols)
+
+        if fold_idx == 0:
+            print("[INFO] Feature sanity check on fold 0 (train)")
+            check_features_quick(Xtr, target=cfg.cols.target)
 
         y_tr = Xtr[cfg.cols.target];  Xtr = DROP_TARGET_COLS(Xtr, cfg.cols.target)
         y_va = Xva[cfg.cols.target];  Xva = DROP_TARGET_COLS(Xva, cfg.cols.target)
