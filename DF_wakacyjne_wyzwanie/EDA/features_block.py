@@ -1,11 +1,28 @@
 # features_block.py
 import pandas as pd
 import numpy as np
+import time
 
-# External feature builders used inside MAKE_FEATURES
 from date_features import extract_comprehensive_date_features
 from promo_features import promo_features_all
 import Lags as lg
+
+
+def _ensure_df(ret):
+    """Ensure a DataFrame is returned (unwrap (df, meta) tuples if necessary)."""
+    return ret[0] if isinstance(ret, tuple) else ret
+
+
+# [CHANGE] Resolve group columns to those that actually exist in df
+def _resolve_group_cols(df: pd.DataFrame, group_cols):
+    """Return only group columns present in df; warn if some are missing."""
+    if not group_cols:
+        return []
+    available = [c for c in group_cols if c in df.columns]
+    missing = [c for c in group_cols if c not in df.columns]
+    if missing:
+        print(f"[WARN] Missing group cols {missing}; using {available or 'no grouping'}.")
+    return available
 
 
 def MAKE_FEATURES(df: pd.DataFrame,
@@ -16,36 +33,52 @@ def MAKE_FEATURES(df: pd.DataFrame,
                   group_cols=None,
                   windows=[7, 14, 28],
                   rolling_stats=['mean', 'std', 'max', 'min', 'sum'],
-                  exp_stats=['mean', 'std', 'max', 'min', 'sum']) -> pd.DataFrame:
+                  exp_stats=['mean', 'std', 'max', 'min', 'sum'],
+                  pre_sorted: bool = False,
+                  timers: bool = False
+                  ) -> pd.DataFrame:
     """
-    Build dataset features for a given slice:
-    - date-related features
-    - promo-related features
-    - lag/rolling/expanding statistics for the target column
+    Build dataset features for a given slice.
     """
+    t0 = time.perf_counter()
+
+    # [CHANGE] Ensure group_cols exist in df
+    gcols = _resolve_group_cols(df, group_cols)
+
     # Date features
-    df = extract_comprehensive_date_features(df)
+    df = _ensure_df(extract_comprehensive_date_features(df))
+    if timers:
+        print(f"[FEATS] date features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
-    # Promo features (uses already joined promo/oil/holiday signals)
-    df = promo_features_all(df)
+    # Promo features
+    df = _ensure_df(promo_features_all(df, group_cols=gcols, pre_sorted=pre_sorted))  # [CHANGE]
+    if timers:
+        print(f"[FEATS] promo features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
-    # Lag features (uses shift(+))
-    df = lg.make_lag(df, lag=lags, group_cols=group_cols, core_column=target_col)
+    # Lag features
+    df = lg.make_lag(df, lag=lags, group_cols=gcols, core_column=target_col)  # [CHANGE]
+    if timers:
+        print(f"[FEATS] lag features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
-    # Moving window features (shift(1) then rolling)
+    # Rolling features
     df = lg.make_rolling(df,
                          rollag=rollag,
                          window=windows,
                          core_column=target_col,
-                         group_cols=group_cols,
+                         group_cols=gcols,  # [CHANGE]
                          rolling_stats=rolling_stats)
+    if timers:
+        print(f"[FEATS] rolling features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
-    # Expanding features (closed='left')
+    # Expanding features
     df = lg.make_expanding(df,
                            core_column=target_col,
                            explag=explag,
                            exp_stats=exp_stats,
-                           group_cols=group_cols)
+                           group_cols=gcols)  # [CHANGE]
+    if timers:
+        print(f"[FEATS] expanding features in {time.perf_counter()-t0:.2f}s")
+
     return df
 
 

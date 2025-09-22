@@ -1,154 +1,175 @@
-"""
-promo_features.py
-Moduł z funkcjami do inżynierii cech promocyjnych na szeregach czasowych.
-"""
-
 import pandas as pd
 import numpy as np
 
-def add_days_since_last_promo_fast(df, group_cols=['store_nbr', 'item_nbr'], date_col='date', promo_col='onpromotion'):
+# Robust helper: convert an arbitrary promo-like Series to pandas BooleanDtype (True/False/NA), preserving NA.
+def _promo_to_boolean_na(s: pd.Series) -> pd.Series:
     """
-    Oblicza liczbę dni od ostatniej promocji dla każdej grupy (np. sklep-produkt).
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Dane wejściowe z kolumnami daty, promocji i kluczy grupujących.
-    group_cols : list, default ['store_nbr', 'item_nbr']
-        Lista kolumn określających poziom agregacji (np. sklep, produkt).
-    date_col : str, default 'date'
-        Nazwa kolumny z datą.
-    promo_col : str, default 'onpromotion'
-        Nazwa kolumny z informacją o promocji (bool lub NaN).
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame z nową kolumną 'days_since_last_promo' (liczba dni od ostatniej promocji).
+    Normalize a promo-like column into a pandas BooleanDtype (True/False/NA), preserving NA.
+    Strategy:
+    - Try numeric coercion (0 -> False, non-zero -> True, NaN -> <NA>)
+    - Fallback: map common textual tokens to booleans and <NA>
     """
-    # Sortowanie i wyznaczanie dat ostatniej promocji
-        # Sortujemy dane po kluczach grupujących i dacie, aby zachować chronologię
-    df_sorted = df.sort_values(group_cols + [date_col]).copy()
-        # Tworzymy serię z datami, gdzie wystąpiła promocja (True), reszta NaN
-    promo_dates = df_sorted[date_col].where(df_sorted[promo_col] == True)
-        # Przenosimy ostatnią znaną datę promocji w dół (ffill) w obrębie grupy
-    last_promo_date = promo_dates.groupby([df_sorted[c] for c in group_cols]).ffill()
-        # Obliczamy liczbę dni od ostatniej promocji
+    # Try numeric route first
+    num = pd.to_numeric(s, errors="coerce")
+    if num.notna().any():
+        out = (num != 0)
+        out = out.astype("boolean")  # convert to BooleanDtype
+        out[num.isna()] = pd.NA      # preserve NA
+        return out
+
+    # Fallback to textual mapping
+    s_str = s.astype("string").str.strip().str.lower()
+    mapping = {
+        "true": True, "false": False,
+        "1": True, "0": False,
+        "yes": True, "no": False,
+        "nan": pd.NA, "none": pd.NA, "": pd.NA
+    }
+    out = s_str.map(mapping)
+    return pd.Series(out, index=s.index, dtype="boolean")
+
+
+def add_days_since_last_promo_fast(df,
+                                   group_cols=['store_nbr', 'item_nbr'],
+                                   date_col='date',
+                                   promo_col='onpromotion',
+                                   pre_sorted: bool = False):
+    """
+    Compute days since last promo; preserves NA in onpromotion.
+    """
+    df_sorted = df if pre_sorted else df.sort_values(group_cols + [date_col])
+    df_sorted = df_sorted.copy()
+    df_sorted[date_col] = pd.to_datetime(df_sorted[date_col])
+
+    promo_flag = _promo_to_boolean_na(df_sorted[promo_col])
+    true_mask = promo_flag.fillna(False)
+
+    promo_dates = df_sorted[date_col].where(true_mask)
+    # [CHANGE] Use Series groupers (list of arrays) for Series.groupby
+    if group_cols:
+        groupers = [df_sorted[c] for c in group_cols]
+        last_promo_date = promo_dates.groupby(groupers, sort=False).ffill()
+    else:
+        last_promo_date = promo_dates.ffill()
+
     df_sorted['days_since_last_promo'] = (df_sorted[date_col] - last_promo_date).dt.days
-        # Jeśli nie było wcześniejszej promocji, zostawiamy NaN
     df_sorted['days_since_last_promo'] = df_sorted['days_since_last_promo'].where(last_promo_date.notna(), np.nan)
     return df_sorted
 
-def add_days_until_next_promo(df, group_cols=['store_nbr', 'item_nbr'], date_col='date', promo_col='onpromotion'):
-    """
-    Oblicza liczbę dni do najbliższej przyszłej promocji dla każdej grupy (np. sklep-produkt).
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Dane wejściowe z kolumnami daty, promocji i kluczy grupujących.
-    group_cols : list, default ['store_nbr', 'item_nbr']
-        Lista kolumn określających poziom agregacji (np. sklep, produkt).
-    date_col : str, default 'date'
-        Nazwa kolumny z datą.
-    promo_col : str, default 'onpromotion'
-        Nazwa kolumny z informacją o promocji (bool lub NaN).
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame z nową kolumną 'days_until_next_promo' (liczba dni do najbliższej promocji).
+def add_days_until_next_promo(df,
+                              group_cols=['store_nbr', 'item_nbr'],
+                              date_col='date',
+                              promo_col='onpromotion',
+                              pre_sorted: bool = False):
     """
-    # Sortowanie i wyznaczanie dat przyszłej promocji
-        # Sortujemy dane po kluczach grupujących i dacie, aby zachować chronologię
-    df_sorted = df.sort_values(group_cols + [date_col]).copy()
-        # Tworzymy serię z datami, gdzie wystąpi promocja (True), reszta NaN
-    promo_dates = df_sorted[date_col].where(df_sorted[promo_col] == True)
-        # Przenosimy najbliższą przyszłą datę promocji w górę (bfill) w obrębie grupy
-    next_promo_date = promo_dates.groupby([df_sorted[c] for c in group_cols]).bfill()
-        # Obliczamy liczbę dni do najbliższej promocji
+    Compute days until next promo; preserves NA in onpromotion.
+    """
+    df_sorted = df if pre_sorted else df.sort_values(group_cols + [date_col])
+    df_sorted = df_sorted.copy()
+    df_sorted[date_col] = pd.to_datetime(df_sorted[date_col])
+
+    promo_flag = _promo_to_boolean_na(df_sorted[promo_col])
+    true_mask = promo_flag.fillna(False)
+
+    promo_dates = df_sorted[date_col].where(true_mask)
+    # [CHANGE] Series groupers for Series.groupby
+    if group_cols:
+        groupers = [df_sorted[c] for c in group_cols]
+        next_promo_date = promo_dates.groupby(groupers, sort=False).bfill()
+    else:
+        next_promo_date = promo_dates.bfill()
+
     df_sorted['days_until_next_promo'] = (next_promo_date - df_sorted[date_col]).dt.days
-        # Jeśli nie ma przyszłej promocji, zostawiamy NaN
     df_sorted['days_until_next_promo'] = df_sorted['days_until_next_promo'].where(next_promo_date.notna(), np.nan)
     return df_sorted
 
-def add_promo_streak(df, group_cols=['store_nbr', 'item_nbr'], date_col='date', promo_col='onpromotion'):
+
+def add_promo_streak(df,
+                     group_cols=['store_nbr', 'item_nbr'],
+                     date_col='date',
+                     promo_col='onpromotion',
+                     pre_sorted: bool = False):
     """
-    Wyznacza długość aktualnej serii dni z promocją (ciąg kolejnych dni z True).
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Dane wejściowe z kolumnami daty, promocji i kluczy grupujących.
-    group_cols : list, default ['store_nbr', 'item_nbr']
-        Lista kolumn określających poziom agregacji (np. sklep, produkt).
-    date_col : str, default 'date'
-        Nazwa kolumny z datą.
-    promo_col : str, default 'onpromotion'
-        Nazwa kolumny z informacją o promocji (bool lub NaN).
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame z nową kolumną 'promo_streak' (długość serii promocji).
+    Compute current promo streak length; preserves NA where onpromotion is NA.
     """
-    # Obliczanie długości serii promocji
-        # Sortujemy dane po kluczach grupujących i dacie
-    df_sorted = df.sort_values(group_cols + [date_col]).copy()
-        # Funkcja pomocnicza do liczenia długości serii (streak)
-    def streak_func(x):
-        streak = (x != x.shift()).cumsum()
-        return x.groupby(streak).cumcount() + 1
-        # Tworzymy maskę dla dni z promocją
-    mask = df_sorted[promo_col] == True
-        # Inicjalizujemy kolumnę streak zerami
-    df_sorted['promo_streak'] = 0
-        # Dla dni z promocją liczymy długość aktualnej serii (ciągu True)
-    df_sorted.loc[mask, 'promo_streak'] = (
-        df_sorted[mask].groupby(group_cols)[promo_col].apply(streak_func).values
-    )
-    return df_sorted
+    df_sorted = df if pre_sorted else df.sort_values(group_cols + [date_col])
+    df_sorted = df_sorted.copy()
 
-def add_promo_next_7days_flag(df, group_cols=['store_nbr', 'item_nbr'], date_col='date', promo_col='onpromotion', window=7):
-    """
-    Sprawdza, czy w najbliższym oknie (domyślnie 7 dni) wystąpi promocja dla danej grupy.
+    promo_flag = _promo_to_boolean_na(df_sorted[promo_col])
+    true_mask = promo_flag.fillna(False)
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Dane wejściowe z kolumnami daty, promocji i kluczy grupujących.
-    group_cols : list, default ['store_nbr', 'item_nbr']
-        Lista kolumn określających poziom agregacji (np. sklep, produkt).
-    date_col : str, default 'date'
-        Nazwa kolumny z datą.
-    promo_col : str, default 'onpromotion'
-        Nazwa kolumny z informacją o promocji (bool lub NaN).
-    window : int, default 7
-        Liczba dni do przodu, w których sprawdzana jest obecność promocji.
+    def _streak_true(s: pd.Series) -> pd.Series:
+        blocks = (s != s.shift()).cumsum()
+        runlen = blocks.groupby(blocks).cumcount() + 1
+        return runlen.where(s, 0)
 
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame z nową kolumną 'promo_in_next_7days' (bool: czy będzie promocja w oknie).
-    """
-    # Przesuwanie okna i sumowanie flag promocji
-        # Sortujemy dane po kluczach grupujących i dacie
-    df_sorted = df.sort_values(group_cols + [date_col]).copy()
-        # Tworzymy DataFrame do zliczania przyszłych promocji w oknie
-    future_promo = pd.DataFrame(0, index=df_sorted.index, columns=['future_promo'])
-        # Przesuwamy okno do przodu o 1..window dni i sumujemy flagi promocji
-    for i in range(1, window+1):
-        future_promo['future_promo'] += df_sorted.groupby(group_cols)[promo_col].shift(-i).fillna(False).astype(int)
-        # Jeśli w oknie pojawi się choć jedna promocja, ustawiamy flagę True
-    df_sorted['promo_in_next_7days'] = future_promo['future_promo'] > 0
+    # [CHANGE] Use Series groupers if grouping; otherwise compute once
+    if group_cols:
+        groupers = [df_sorted[c] for c in group_cols]
+        run = true_mask.groupby(groupers, sort=False).transform(_streak_true).astype('Int16')
+    else:
+        run = _streak_true(true_mask).astype('Int16')
+
+    # Restore NA where original flag was NA
+    run[promo_flag.isna()] = pd.NA
+    df_sorted['promo_streak'] = run
     return df_sorted
 
 
-def promo_features_all(df: pd.DataFrame):
-    df = add_days_since_last_promo_fast(df)
-    df = add_days_until_next_promo(df)
-    df = add_promo_streak(df)
-    df = add_promo_next_7days_flag(df)
+def add_promo_next_7days_flag(df,
+                              group_cols=['store_nbr', 'item_nbr'],
+                              date_col='date',
+                              promo_col='onpromotion',
+                              window=7,
+                              pre_sorted: bool = False):
+    """
+    Flag (Int8 with <NA>) if any promo occurs within next 'window' days per group.
+    """
+    df_sorted = df if pre_sorted else df.sort_values(group_cols + [date_col])
+    df_sorted = df_sorted.copy()
+
+    promo_flag = _promo_to_boolean_na(df_sorted[promo_col])
+
+    future_true = pd.Series(0, index=df_sorted.index, dtype='Int16')
+    future_na = pd.Series(0, index=df_sorted.index, dtype='Int16')
+
+    # [CHANGE] Use Series groupers when grouping; else shift on entire series
+    if group_cols:
+        groupers = [df_sorted[c] for c in group_cols]
+        for i in range(1, window + 1):
+            shifted = promo_flag.groupby(groupers, sort=False).shift(-i)
+            future_true += shifted.fillna(False).astype('Int8').astype('Int16')
+            future_na += shifted.isna().astype('Int8').astype('Int16')
+    else:
+        for i in range(1, window + 1):
+            shifted = promo_flag.shift(-i)
+            future_true += shifted.fillna(False).astype('Int8').astype('Int16')
+            future_na += shifted.isna().astype('Int8').astype('Int16')
+
+    out = pd.Series(pd.NA, index=df_sorted.index, dtype="Int8")
+    out[future_true > 0] = 1
+    out[(future_true == 0) & (future_na == 0)] = 0
+
+    df_sorted['promo_in_next_7days'] = out
+    return df_sorted
+
+
+def promo_features_all(df: pd.DataFrame,
+                       group_cols=['store_nbr', 'item_nbr'],
+                       date_col='date',
+                       promo_col='onpromotion',
+                       pre_sorted: bool = False,
+                       window: int = 7):
+    """
+    Compose promo features (NA-preserving) for the given grouping.
+    """
+    df = add_days_since_last_promo_fast(df, group_cols=group_cols, date_col=date_col,
+                                        promo_col=promo_col, pre_sorted=pre_sorted)
+    df = add_days_until_next_promo(df, group_cols=group_cols, date_col=date_col,
+                                   promo_col=promo_col, pre_sorted=pre_sorted)
+    df = add_promo_streak(df, group_cols=group_cols, date_col=date_col,
+                          promo_col=promo_col, pre_sorted=pre_sorted)
+    df = add_promo_next_7days_flag(df, group_cols=group_cols, date_col=date_col,
+                                   promo_col=promo_col, window=window, pre_sorted=pre_sorted)
     return df
-
-
