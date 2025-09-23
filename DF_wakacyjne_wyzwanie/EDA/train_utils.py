@@ -1,11 +1,31 @@
 # train_utils.py
 import numpy as np
 import pandas as pd
+import time
 
 # [NOTE] Optional dependencies are imported lazily inside functions to avoid import errors if not installed.
 
+
+def _mem_str(bytes_total: int) -> str:
+    """Format bytes as human-readable string (approx)."""
+    gb = bytes_total / (1024 ** 3)
+    if gb >= 1:
+        return f"{gb:.2f} GB"
+    mb = bytes_total / (1024 ** 2)
+    return f"{mb:.1f} MB"
+
+
+def MIN_DATE(df: pd.DataFrame, date_col: str = "date") -> pd.Timestamp:
+    """Return the minimum date in the specified date column."""
+    return pd.to_datetime(df[date_col]).min()
+
+
+def MAX_DATE(df: pd.DataFrame, date_col: str = "date") -> pd.Timestamp:
+    """Return the maximum date in the specified date column."""
+    return pd.to_datetime(df[date_col]).max()
+
+
 def _is_pandas_nullable_int(dtype) -> bool:
-    """Return True if dtype is a pandas nullable integer (e.g., Int8/Int16/Int32/Int64)."""
     return pd.api.types.is_integer_dtype(dtype) and hasattr(dtype, "name") and dtype.name.startswith("Int")
 
 
@@ -19,48 +39,34 @@ def _prepare_features_for_framework(X: pd.DataFrame, framework: str):
     Returns (X_prepared, categorical_feature_names)
     """
     Xp = X.copy()
-
-    # Drop datetimes and unsupported columns
+    # Drop datetimes
     dt_cols = [c for c in Xp.columns if pd.api.types.is_datetime64_any_dtype(Xp[c])]
     if dt_cols:
         Xp.drop(columns=dt_cols, inplace=True)
-
     # object -> category
     obj_cols = [c for c in Xp.columns if Xp[c].dtype == "object"]
     for c in obj_cols:
         Xp[c] = Xp[c].astype("category")
-
-    # pandas BooleanDtype -> float32 (True=1.0, False=0.0, <NA>=NaN)
+    # pandas BooleanDtype -> float32
     bool_na_cols = [c for c in Xp.columns if str(Xp[c].dtype) == "boolean"]
     for c in bool_na_cols:
         Xp[c] = Xp[c].astype("float32")
-
-    # numpy bool -> uint8 (0/1)
+    # numpy bool -> uint8
     bool_cols = [c for c in Xp.columns if Xp[c].dtype == bool]
     for c in bool_cols:
         Xp[c] = Xp[c].astype("uint8")
-
-    # pandas nullable integers -> float32 (preserve NaN)
+    # pandas nullable ints -> float32
     pand_int_cols = [c for c in Xp.columns if _is_pandas_nullable_int(Xp[c].dtype)]
     for c in pand_int_cols:
         Xp[c] = Xp[c].astype("float32")
-
-    # unsigned nullable ints (e.g., UInt8) -> float32 (preserve NaN if any)
+    # unsigned nullable ints -> float32 (jeśli występują)
     if hasattr(pd, "UInt8Dtype"):
-        ucols = [c for c in Xp.columns if isinstance(Xp[c].dtype, (pd.UInt8Dtype, pd.UInt16Dtype, pd.UInt32Dtype, getattr(pd, "UInt64Dtype", type("D", (), {}))))]  # type: ignore
+        utypes = (pd.UInt8Dtype, pd.UInt16Dtype, pd.UInt32Dtype, getattr(pd, "UInt64Dtype", type("D", (), {})))
+        ucols = [c for c in Xp.columns if isinstance(Xp[c].dtype, utypes)]  # type: ignore
         for c in ucols:
             Xp[c] = Xp[c].astype("float32")
 
-    # numeric downcast where safe (optional)
-    # Xp = Xp.apply(lambda s: pd.to_numeric(s, errors="ignore", downcast="float") if pd.api.types.is_float_dtype(s) else s)
-
-    # categorical features: dtype == category
     cat_cols = [c for c in Xp.columns if pd.api.types.is_categorical_dtype(Xp[c])]
-
-    # Framework-specific notes:
-    # - LightGBM: accepts category dtype directly via categorical_feature list
-    # - XGBoost: requires enable_categorical=True and pandas category dtype is OK
-
     return Xp, cat_cols
 
 
@@ -79,34 +85,52 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
     framework = str(getattr(model_cfg, "framework", "lightgbm")).lower()
     params = dict(getattr(model_cfg, "params", {}))
 
-    # Prepare features per framework
+    # [CHANGE] basic logging before prep
+    print(f"[TRAIN] Framework={framework} | Xtr={Xtr.shape}, Xva={Xva.shape}")
+
+    # Prepare features
+    t0 = time.perf_counter()
     Xtr_prep, cat_cols = _prepare_features_for_framework(Xtr, framework)
     Xva_prep, _ = _prepare_features_for_framework(Xva, framework)
+    prep_time = time.perf_counter() - t0
 
+    # [CHANGE] memory and categories info
+    mem_tr = _mem_str(Xtr_prep.memory_usage(deep=True).sum())
+    mem_va = _mem_str(Xva_prep.memory_usage(deep=True).sum())
+    print(f"[TRAIN] Prepared in {prep_time:.2f}s | cat_cols={len(cat_cols)} | mem(Xtr)={mem_tr}, mem(Xva)={mem_va}")
+
+    t0 = time.perf_counter()
     if framework == "lightgbm":
         import lightgbm as lgb
-        # Sensible defaults if not provided
         params.setdefault("objective", "regression")
         params.setdefault("metric", "rmse")
         params.setdefault("n_estimators", 2000)
         params.setdefault("learning_rate", 0.05)
         params.setdefault("verbosity", -1)
-
         early_stopping_rounds = params.pop("early_stopping_rounds", 200)
 
         model = lgb.LGBMRegressor(**params)
+        # [CHANGE] add log_evaluation for periodic progress
+        callbacks = [
+            lgb.log_evaluation(period=50),
+            lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True),
+        ]
         model.fit(
             Xtr_prep, y_tr,
             eval_set=[(Xva_prep, y_va)],
             eval_metric=params.get("metric", "rmse"),
             categorical_feature=cat_cols if len(cat_cols) > 0 else "auto",
-            callbacks=[lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True)]
+            callbacks=callbacks
         )
+        train_time = time.perf_counter() - t0
+        # [CHANGE] print best iteration/score
+        best_iter = getattr(model, "best_iteration_", None)
+        best_score = getattr(model, "best_score_", None)
+        print(f"[TRAIN] Done in {train_time:.2f}s | best_iteration={best_iter} | best_score={best_score}")
         return model
 
     elif framework == "xgboost":
         import xgboost as xgb
-        # Defaults for speed/stability
         params.setdefault("objective", "reg:squarederror")
         params.setdefault("tree_method", "hist")
         params.setdefault("learning_rate", 0.05)
@@ -116,6 +140,7 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
         eval_metric = params.pop("eval_metric", "rmse")
 
         model = xgb.XGBRegressor(**params)
+        # [CHANGE] verbose=True will print eval every ~10 rounds
         model.fit(
             Xtr_prep, y_tr,
             eval_set=[(Xva_prep, y_va)],
@@ -123,6 +148,20 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
             verbose=True,
             early_stopping_rounds=early_stopping_rounds
         )
+        train_time = time.perf_counter() - t0
+        # [CHANGE] print best iteration/score
+        best_iter = getattr(model, "best_iteration", None)
+        best_score = getattr(model, "best_score", None)
+        # fallback to evals_result if needed
+        if best_score is None and hasattr(model, "evals_result_"):
+            try:
+                hist = model.evals_result_["validation_0"][eval_metric]
+                best_idx = int(np.argmin(hist))
+                best_iter = best_idx
+                best_score = hist[best_idx]
+            except Exception:
+                pass
+        print(f"[TRAIN] Done in {train_time:.2f}s | best_iteration={best_iter} | best_score={best_score}")
         return model
 
     else:
@@ -134,9 +173,13 @@ def PREDICT(model: object, X: pd.DataFrame, model_cfg) -> np.ndarray:
     Predict using the trained model, preparing features consistently.
     """
     framework = str(getattr(model_cfg, "framework", "lightgbm")).lower()
+    # [CHANGE] log shape before predict
+    print(f"[PRED] Predicting with {framework} on X={X.shape}")
+    t0 = time.perf_counter()
     Xp, _ = _prepare_features_for_framework(X, framework)
     preds = model.predict(Xp)
-    # LightGBM returns shape (n,) float; XGBoost same
+    dt = time.perf_counter() - t0
+    print(f"[PRED] Done in {dt:.2f}s")
     return np.asarray(preds, dtype="float64")
 
 
@@ -182,7 +225,6 @@ def AGGREGATE_FOLD_SCORES(fold_scores: list[dict]) -> dict:
         if vals.size:
             summary[k] = {"mean": float(vals.mean()), "std": float(vals.std(ddof=0))}
     return summary
-
 
 def TRAIN_MODEL_NO_VALIDATION(X: pd.DataFrame, y: pd.Series, model_cfg) -> object:
     """

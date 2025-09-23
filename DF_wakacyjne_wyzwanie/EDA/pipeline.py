@@ -6,26 +6,14 @@ import Lags as lg
 from extend_train import create_extend_train, load_favorita_tables
 from handling_nan_values import fill_time_series_full_range, process_promotions_flexible, fill_oil_pchip
 from JOIN_OIL_PROMOS import JOIN_OIL_PROMOS
-from features_block import (
-    MAKE_FEATURES,
-    compute_frozen_days_from_max_lag,
-    unique_dates,
-    build_rolling_windows,
-    SLICE_BY_DATE,
-    DROP_TARGET_COLS
-)
+from features_block import *
 from feature_checks import check_features_quick
-from train_utils import (
-    TRAIN_MODEL,
-    PREDICT,
-    EVALUATE_METRICS,
-    AGGREGATE_FOLD_SCORES,
-    TRAIN_MODEL_NO_VALIDATION,
-)
+from train_utils import *
 
 from types import SimpleNamespace
 import time
 from pathlib import Path
+import joblib
 
 # Detect available Parquet engine at import time
 try:
@@ -180,7 +168,15 @@ def run_modeling_pipeline(cfg):
         fold_scores.append( EVALUATE_METRICS(y_va, preds, metrics = ["RMSE","WMAPE"]) )
         models_per_fold.append(model)
 
+        models_dir = Path("artifacts/models")
+        models_dir.mkdir(parents=True, exist_ok=True)
+        model_path = models_dir / f"{cfg.model.framework}_fold{fold_idx}.pkl"
+        joblib.dump(model, model_path)
+        print(f"[MODEL] Saved {cfg.model.framework} fold {fold_idx} to {model_path}")
+
     cv_summary = AGGREGATE_FOLD_SCORES(fold_scores)
+    print("[CV] fold_scores:", fold_scores)
+    print("[CV] summary:", cv_summary)
 
     # HYPERTUNING
 
@@ -188,10 +184,10 @@ def run_modeling_pipeline(cfg):
     #    (optionally up to scoring_period.t_min - 1)
     print('7) (Optional) Refit final model on all history up to the end of training')
     full_hist = SLICE_BY_DATE(train, [MIN_DATE(train), MAX_DATE(train)])
-    X_full = MAKE_FEATURES(full_hist, max_lag)
+    X_full = MAKE_FEATURES(full_hist, max_lag) # TODO ensure that the function accepts this type of call
     y_full = X_full[cfg.cols.target];  X_full = DROP_TARGET_COLS(X_full, cfg.cols.target)
 
-    final_model = TRAIN_MODEL_NO_VALIDATION(X_full, y_full, cfg.model)
+    final_model = TRAIN_MODEL_NO_VALIDATION(X_full, y_full, cfg.model)  # TODO
 
 
 
