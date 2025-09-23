@@ -1,0 +1,121 @@
+# ============================================
+# HYPERTUNING Z WBUDOWANĄ „FS” (po Modeling)
+# ============================================
+
+function HYPERTUNE_EMBEDDED_FS(train_df,
+                               windows,                 # lista (train_range, val_range) z Modeling
+                               make_features,           # buduje cechy (past-only, używa max_lag)
+                               base_model_params,       # stałe paramy modelu (lr, n_estimators, seed, itp.)
+                               max_lag,
+                               metric = "RMSE",
+                               n_trials = 80,
+                               pruner = "median",       # albo "none"
+                               model_name = "lgbm"):    # "lgbm" | "xgb"
+
+    # --- 1) PRZESTRZEŃ (tylko parametry „FS”)
+    function SUGGEST_PARAMS(trial):
+        p = {}
+        if model_name == "lgbm":
+            # „FS przez parametry” w LightGBM
+            p.feature_fraction = trial.suggest_float(0.40, 1.00)     # subsampling kolumn per drzewo
+            p.min_data_in_leaf = trial.suggest_int(20, 200)          # wygładzanie / kontrola złożoności
+            p.lambda_l1        = trial.suggest_float(0.0, 10.0, log=true)
+            p.lambda_l2        = trial.suggest_float(0.0, 10.0, log=true)
+            # rezta parametrów w LGBM:
+            #p....
+
+
+        else:  # "xgb"
+            # Mapowanie: L1/L2 i colsample w XGBoost
+            p.colsample_bytree = trial.suggest_float(0.40, 1.00)
+            p.reg_alpha        = trial.suggest_float(0.0, 10.0, log=true)   # L1
+            p.reg_lambda       = trial.suggest_float(0.0, 10.0, log=true)   # L2
+            # Przybliżenie „min_data_in_leaf”:
+            p.min_child_weight = trial.suggest_float(1.0, 20.0, log=true)   # odpowiednik XGB
+            # rezta parametrów w XGB:
+            #p....
+
+        return p
+
+    # --- 2) SKLEJ PARAMY DLA KONKRETNEJ BIBLIOTEKI
+    function BUILD_MODEL_PARAMS(base_model_params, tuned_params):
+        if model_name == "lgbm":
+            return MERGE(base_model_params, {
+                "feature_fraction": tuned_params.feature_fraction,
+                "min_data_in_leaf": tuned_params.min_data_in_leaf,
+                "lambda_l1":        tuned_params.lambda_l1,
+                "lambda_l2":        tuned_params.lambda_l2,
+                #... inne paramy LGBM z
+            })
+        else:  # "xgb"
+            return MERGE(base_model_params, {
+                "colsample_bytree": tuned_params.colsample_bytree,
+                "reg_alpha":        tuned_params.reg_alpha,
+                "reg_lambda":       tuned_params.reg_lambda,
+                "min_child_weight": tuned_params.min_child_weight
+                #... inne paramy XGB
+            })
+
+    # --- 3) EWALUACJA PRZEZ WSZYSTKIE OKNA (średnia metryka)
+    function CV_EVAL(params_for_model, trial=None):
+        scores = []
+        fold_details = []
+        k = 0
+        for (train_rng, val_rng) in windows:
+            tr = SLICE_BY_DATE(train_df, train_rng)
+            va = SLICE_BY_DATE(train_df, val_rng)
+
+            Xtr = make_features(tr, max_lag)
+            Xva = make_features(va, max_lag)
+
+            y_tr = Xtr[TARGET];  Xtr = DROP_TARGET(Xtr, TARGET)
+            y_va = Xva[TARGET];  Xva = DROP_TARGET(Xva, TARGET)
+
+            if model_name == "lgbm":
+                model = TRAIN_LGBM(Xtr, y_tr, Xva, y_va,
+                                   params = params_for_model,
+                                   early_stopping_rounds = base_model_params.early_stopping_rounds,
+                                   num_boost_round = base_model_params.n_estimators)
+                preds = PREDICT_LGBM(model, Xva)
+            else:
+                model = TRAIN_XGB(Xtr, y_tr, Xva, y_va,
+                                  params = params_for_model,
+                                  early_stopping_rounds = base_model_params.early_stopping_rounds,
+                                  num_boost_round = base_model_params.n_estimators)
+                preds = PREDICT_XGB(model, Xva)
+
+            sc = EVAL_METRIC(metric, y_va, preds)   # np. RMSE
+            scores.append(sc)
+            k = k + 1
+            fold_details.append({ "fold": k, "val_start": MIN(va.date), "val_end": MAX(va.date), "score": sc })
+
+            if trial is not None:
+                TRIAL_REPORT(trial, sc, step=k)
+                if TRIAL_SHOULD_PRUNE(trial): raise TRIAL_PRUNED
+
+        return MEAN(scores), fold_details
+
+    # --- 4) FUNKCJA CELU DLA OPTIMIZERA
+    function OBJECTIVE(trial):
+        tuned = SUGGEST_PARAMS(trial)
+        params_for_model = BUILD_MODEL_PARAMS(base_model_params, tuned)
+        cv_mean, _ = CV_EVAL(params_for_model, trial)
+        return cv_mean
+
+    # --- 5) OPTIMIZACJA
+    pruner_obj = (pruner == "median") ? MEDIAN_PRUNER() : NO_PRUNER()
+    study = CREATE_STUDY(direction="minimize", pruner=pruner_obj)
+    OPTIMIZE(study, OBJECTIVE, n_trials=n_trials, n_jobs=PARALLEL_OK)
+
+    best_tuned = study.best_params
+    best_params_for_model = BUILD_MODEL_PARAMS(base_model_params, best_tuned)
+    best_cv_mean, best_cv_folds = CV_EVAL(best_params_for_model)   # re-run bez pruningu dla raportu
+
+    # --- 6) ZWRÓĆ NAJLEPSZE PARAMY + PODSUMOWANIE
+    return {
+        "best_model_params": best_params_for_model,
+        "best_tuned_only":   best_tuned,           # same FS-paramy
+        "cv_mean":           best_cv_mean,
+        "cv_by_fold":        best_cv_folds,
+        "study_summary":     EXTRACT_TRIAL_HISTORY(study)
+    }
