@@ -1,3 +1,5 @@
+import numpy as np
+import pandas as pd
 
 import holidays_preproc as hp
 import Lags as lg
@@ -15,6 +17,19 @@ from features_block import (
 from feature_checks import check_features_quick
 
 from types import SimpleNamespace
+import time
+from pathlib import Path
+
+# Detect available Parquet engine at import time
+try:
+    import pyarrow  # noqa: F401
+    PARQUET_ENGINE = "pyarrow"
+except Exception:
+    try:
+        import fastparquet  # noqa: F401
+        PARQUET_ENGINE = "fastparquet"
+    except Exception:
+        PARQUET_ENGINE = None
 
 
 def run_modeling_pipeline(cfg):
@@ -28,7 +43,6 @@ def run_modeling_pipeline(cfg):
     stores = dfs['stores']
     items = dfs['items']
     holidays = dfs['holidays_events']
-
 
     # 2) Preprocess (your functions)
     print('2) Preprocess')
@@ -53,7 +67,7 @@ def run_modeling_pipeline(cfg):
 
     # 5) Time-series cross-validation windows
     print('5) Time-series cross-validation windows')
-    # [CHANGE] Tune window parameters so at least one CV window can be built
+    # Tune window parameters so at least one CV window can be built
     max_lag = 84        # was 365  # shorter max lag → smaller embargo
     max_window = 14     # was 30   # smaller rolling window → smaller embargo
     validation_windows = 3
@@ -98,8 +112,33 @@ def run_modeling_pipeline(cfg):
         tr = SLICE_BY_DATE(train, train_range)
         va = SLICE_BY_DATE(train, val_range)
 
-        Xtr = MAKE_FEATURES(tr, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols)
-        Xva = MAKE_FEATURES(va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols)
+        # Sort once (stable) by group_cols + date to avoid re-sorting inside feature functions
+        t0 = time.perf_counter()
+        tr = tr.sort_values(cfg.cols.group_cols + ['date'], kind='mergesort')
+        va = va.sort_values(cfg.cols.group_cols + ['date'], kind='mergesort')
+        print(f"[FEATS] Fold {fold_idx}: sorted tr={len(tr):,}, va={len(va):,} in {time.perf_counter()-t0:.2f}s")
+
+        # Xtr = MAKE_FEATURES(tr, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
+        #                     pre_sorted=True, timers=True)
+        # Xva = MAKE_FEATURES(va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
+        #                     pre_sorted=True, timers=True)
+        # Limit rolling/expanding for first comparison; pass group_cols from cfg; keep timers
+        Xtr = MAKE_FEATURES(
+            tr, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
+            lags=[7, 14],                 # keep only light lags
+            windows=[7],                  # rolling 7 only
+            rolling_stats=["mean"],       # mean only
+            exp_stats=[],                 # disable expanding
+            pre_sorted=True, timers=True
+        )
+        Xva = MAKE_FEATURES(
+            va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
+            lags=[7, 14],
+            windows=[7],
+            rolling_stats=["mean"],
+            exp_stats=[],
+            pre_sorted=True, timers=True
+        )
 
         if fold_idx == 0:
             print("[INFO] Feature sanity check on fold 0 (train)")
@@ -107,6 +146,26 @@ def run_modeling_pipeline(cfg):
 
         y_tr = Xtr[cfg.cols.target];  Xtr = DROP_TARGET_COLS(Xtr, cfg.cols.target)
         y_va = Xva[cfg.cols.target];  Xva = DROP_TARGET_COLS(Xva, cfg.cols.target)
+
+        # Save fold 0 features/targets to Parquet if engine is available, else fallback to pickle
+        if fold_idx == 0 and getattr(cfg, "cache", None) is not None and getattr(cfg.cache, "save_fold0", True):
+            cache_dir = Path(cfg.cache.dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+
+            if PARQUET_ENGINE:
+                # Use Parquet with the detected engine (optionally add compression="snappy"/"zstd")
+                Xtr.to_parquet(cache_dir / "Xtr_fold0.parquet", index=False, engine=PARQUET_ENGINE)
+                Xva.to_parquet(cache_dir / "Xva_fold0.parquet", index=False, engine=PARQUET_ENGINE)
+                y_tr.to_frame(name=cfg.cols.target).to_parquet(cache_dir / "y_tr_fold0.parquet", engine=PARQUET_ENGINE)
+                y_va.to_frame(name=cfg.cols.target).to_parquet(cache_dir / "y_va_fold0.parquet", engine=PARQUET_ENGINE)
+                print(f"[CACHE] Saved fold 0 to {cache_dir} (engine={PARQUET_ENGINE})")
+            else:
+                # Fallback: pickle (larger files, but no extra deps)
+                Xtr.to_pickle(cache_dir / "Xtr_fold0.pkl")
+                Xva.to_pickle(cache_dir / "Xva_fold0.pkl")
+                y_tr.to_frame(name=cfg.cols.target).to_pickle(cache_dir / "y_tr_fold0.pkl")
+                y_va.to_frame(name=cfg.cols.target).to_pickle(cache_dir / "y_va_fold0.pkl")
+                print(f"[CACHE] Parquet engine not available. Saved pickle files to {cache_dir}")
 
         model = TRAIN_MODEL(Xtr, y_tr, Xva, y_va, cfg.model)         # LightGBM / XGBoost + early stop
         preds = PREDICT(model, Xva, cfg.model)
@@ -138,6 +197,10 @@ cfg = SimpleNamespace(
     cols=SimpleNamespace(
         target="unit_sales",
         group_cols=["store_nbr", "item_nbr"]  # group keys for lag/rolling/expanding
+    ),
+    cache=SimpleNamespace(
+        dir="cache",          # directory to save parquet files
+        save_fold0=True       # save features/targets for fold 0
     ),
     model=SimpleNamespace(
         framework="lightgbm",
