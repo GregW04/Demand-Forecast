@@ -6,6 +6,7 @@ import time
 from date_features import extract_comprehensive_date_features
 from promo_features import promo_features_all
 import Lags as lg
+from seasonality import create_seasonality_features
 
 
 def _ensure_df(ret):
@@ -49,6 +50,11 @@ def MAKE_FEATURES(df: pd.DataFrame,
     df = _ensure_df(extract_comprehensive_date_features(df))
     if timers:
         print(f"[FEATS] date features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
+
+    # Seasonality features
+    df = _ensure_df(create_seasonality_features(df, group_cols=gcols))  # [CHANGE]
+    if timers:
+        print(f"[FEATS] seasonality features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
     # Promo features
     df = _ensure_df(promo_features_all(df, group_cols=gcols, pre_sorted=pre_sorted))  # [CHANGE]

@@ -364,6 +364,43 @@ def add_regular_coeff_m(df: pd.DataFrame,
     coeff_df = pd.DataFrame(results, columns=['year','month_of_year','regular_coeff'])
     return data.merge(coeff_df, on=['year','month_of_year'], how='left')
 
+def create_seasonality_features(df: pd.DataFrame,
+                               start_year: int | None = None,
+                               end_year: int | None = None) -> pd.DataFrame:
+    """
+    Adds to df the following columns:
+    - 'seasonal_idx_w' (float)
+    - 'seasonal_idx_m' (float)
+    - 'regular_coeff_w' (float)
+    - 'regular_coeff_m' (float)
+
+    Parameters:
+    ----------
+    df : pd.DataFrame
+        Input DataFrame containing at least the following columns:
+        - 'date' (datetime or convertible to datetime)
+        - 'unit_sales' (numeric)
+
+    start_year : int or None, default None
+        The first year to include in the calculation of seasonal indices and regular coefficients.
+        Rows from earlier years will receive NaN in these columns.
+
+    end_year : int or None, default None
+        The last year to include in the calculation of seasonal indices and regular coefficients.
+        Rows from later years will receive NaN in these columns.
+
+    Returns:
+    -------
+    pd.DataFrame
+        DataFrame extended with the specified seasonality-related columns.
+    """
+    data = df.copy()
+    data = add_seasonal_idx_w(data, start_year=start_year, end_year=end_year)
+    data = add_seasonal_idx_m(data, start_year=start_year, end_year=end_year)
+    data = add_regular_coeff_w(data, start_year=start_year, end_year=end_year)
+    data = add_regular_coeff_m(data, start_year=start_year, end_year=end_year)
+
+    return data
 
 if __name__ == "__main__":
     pass
