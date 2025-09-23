@@ -131,41 +131,46 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
 
     elif framework == "xgboost":
         import xgboost as xgb
+
+        # Defaults for speed/stability
         params.setdefault("objective", "reg:squarederror")
         params.setdefault("tree_method", "hist")
         params.setdefault("learning_rate", 0.05)
         params.setdefault("n_estimators", 2000)
         params.setdefault("enable_categorical", True)
-        params.setdefault("eval_metric", "rmse")  # move eval_metric into params (constructor)
 
-        early_stopping_rounds = params.pop("early_stopping_rounds", 200)
+        # [CHANGE] In XGBoost>=3.x pass eval_metric and early_stopping_rounds in the constructor
+        params.setdefault("eval_metric", "rmse")
+        params.setdefault("early_stopping_rounds", 200)
+        params.setdefault("verbosity", 1)  # print training progress (optional)
 
-        # pass eval_metric via constructor; remove from fit
         model = xgb.XGBRegressor(**params)
 
-        # use callback-based early stopping (compatible with xgboost>=2.0)
-        callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True)]
-
+        # [CHANGE] fit without callbacks/early_stopping_rounds kwargs (not supported in 3.x fit)
         model.fit(
             Xtr_prep, y_tr,
             eval_set=[(Xva_prep, y_va)],
-            callbacks=callbacks,
             verbose=True
         )
 
         train_time = time.perf_counter() - t0
-        # robust best iteration/score retrieval
+
+        # [CHANGE] robust best iteration/score retrieval for 3.x
         best_iter = getattr(model, "best_iteration", None)
         best_score = getattr(model, "best_score", None)
-        if best_score is None and hasattr(model, "evals_result_"):
+        # Try evals_result() if needed
+        if best_score is None and hasattr(model, "evals_result"):
             try:
+                er = model.evals_result()
                 metric = params.get("eval_metric", "rmse")
-                hist = model.evals_result_["validation_0"][metric]
-                best_idx = int(np.argmin(hist))
-                best_iter = best_idx
-                best_score = hist[best_idx]
+                if "validation_0" in er and metric in er["validation_0"]:
+                    hist = er["validation_0"][metric]
+                    best_idx = int(np.argmin(hist))
+                    best_iter = best_idx
+                    best_score = hist[best_idx]
             except Exception:
                 pass
+
         print(f"[TRAIN] Done in {train_time:.2f}s | best_iteration={best_iter} | best_score={best_score}")
         return model
 

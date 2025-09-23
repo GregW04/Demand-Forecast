@@ -118,6 +118,7 @@ def run_modeling_pipeline(cfg):
         # Xva = MAKE_FEATURES(va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
         #                     pre_sorted=True, timers=True)
         # Limit rolling/expanding for first comparison; pass group_cols from cfg; keep timers
+        print('Make features for Xtr')
         Xtr = MAKE_FEATURES(
             tr, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
             lags=[7, 14],                 # keep only light lags
@@ -126,6 +127,7 @@ def run_modeling_pipeline(cfg):
             exp_stats=[],                 # disable expanding
             pre_sorted=True, timers=True
         )
+        print('Make features for Xva')
         Xva = MAKE_FEATURES(
             va, target_col=cfg.cols.target, group_cols=cfg.cols.group_cols,
             lags=[7, 14],
