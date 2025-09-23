@@ -1,0 +1,42 @@
+{
+  "paths": [
+    "train.csv",
+    "oil.csv",
+    "stores.csv",
+    "items.csv",
+    "holidays_events.csv"
+  ],
+  "cv": {
+    "stride_days": 14,
+    "min_train_days": 365
+  },
+  "cols": {
+    "target": "unit_sales",
+    "group_cols": [
+      "store_nbr",
+      "item_nbr"
+    ]
+  },
+  "cache": {
+    "dir": "cache",
+    "save_fold0": true
+  },
+  "model": {
+    "framework": "lightgbm",
+    "params": {
+      "n_estimators": 1000,
+      "learning_rate": 0.05,
+      "num_leaves": 31,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "random_state": 42
+    }
+  },
+  "hpo": {
+    "enabled": true,
+    "n_trials": 3,
+    "windows_limit": 2,
+    "pruner": "median",
+    "cache_dir": "cache/hpo"
+  }
+}

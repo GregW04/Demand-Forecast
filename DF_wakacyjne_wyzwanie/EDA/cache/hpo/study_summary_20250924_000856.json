@@ -1,0 +1,35 @@
+[
+  {
+    "number": 0,
+    "value": 1.989777779258504,
+    "state": "1",
+    "params": {
+      "feature_fraction": 0.7444990388293311,
+      "min_data_in_leaf": 55,
+      "lambda_l1": 7.77349614986244e-05,
+      "lambda_l2": 0.6525176881907808
+    }
+  },
+  {
+    "number": 1,
+    "value": 2.2517055830187385,
+    "state": "1",
+    "params": {
+      "feature_fraction": 0.5117159458896327,
+      "min_data_in_leaf": 81,
+      "lambda_l1": 0.0005051481088804198,
+      "lambda_l2": 1.6490693412154728e-07
+    }
+  },
+  {
+    "number": 2,
+    "value": 2.29707728198418,
+    "state": "1",
+    "params": {
+      "feature_fraction": 0.7225638968043373,
+      "min_data_in_leaf": 145,
+      "lambda_l1": 0.0020767880402403753,
+      "lambda_l2": 3.488249217546811e-07
+    }
+  }
+]

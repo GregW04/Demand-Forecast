@@ -9,7 +9,7 @@ from JOIN_OIL_PROMOS import JOIN_OIL_PROMOS
 from features_block import *
 from feature_checks import check_features_quick
 from train_utils import *
-from DF_wakacyjne_wyzwanie.EDA.hypertune import HYPERTUNE_EMBEDDED_FS
+from hypertune import HYPERTUNE_EMBEDDED_FS
 
 from types import SimpleNamespace
 import time
@@ -186,7 +186,63 @@ def run_modeling_pipeline(cfg):
     # 7) (Optional) Refit final model on all history up to the end of training
     #    (optionally up to scoring_period.t_min - 1)
     print('7) (Optional) Refit final model on all history up to the end of training')
-    # TODO
+
+    print(f"[HPO] enabled? hpo in cfg: {hasattr(cfg,'hpo')}, enabled: {getattr(getattr(cfg,'hpo', None),'enabled', None)}")
+    # Hyperparameter tuning (optional, separate step; does not affect what already works)
+    if getattr(cfg, "hpo", None) and getattr(cfg.hpo, "enabled", False):
+        print("[HPO] Starting hyperparameter search...")
+
+        # Thin wrapper around MAKE_FEATURES with the same settings you used in CV
+        def MAKE_FEATURES_WRAPPER(df, max_lag):
+            # sort once to speed promo/rolling (same as in CV)
+            df = df.sort_values(cfg.cols.group_cols + ['date'], kind='mergesort')
+            return MAKE_FEATURES(
+                df,
+                target_col=cfg.cols.target,
+                group_cols=cfg.cols.group_cols,
+                lags=[7, 14],
+                windows=[7],
+                rolling_stats=["mean"],
+                exp_stats=[],      # expanding disabled for initial comparison
+                pre_sorted=True,
+                timers=False
+            )
+
+        # Use current framework for HPO: "lgbm" if cfg.model.framework is LightGBM, otherwise "xgb"
+        model_for_hpo = "xgb" if str(cfg.model.framework).lower() == "xgboost" else "lgbm"
+
+        # Base params for the chosen framework (copied; HPO only merges FS-related knobs)
+        base_params = dict(cfg.model.params)
+
+        # IMPORTANT (only if framework == xgboost>=3.x):
+        # make sure eval_metric and early_stopping_rounds are in base params
+        if model_for_hpo == "xgb":
+            base_params.setdefault("eval_metric", "rmse")
+            base_params.setdefault("early_stopping_rounds", 50)
+            base_params.setdefault("tree_method", "hist")
+            base_params.setdefault("enable_categorical", True)
+
+        # Run HPO on a limited number of windows/trials first (fast), can increase later
+        hpo_result = HYPERTUNE_EMBEDDED_FS(
+            train_df=train,
+            windows=windows,
+            make_features=MAKE_FEATURES_WRAPPER,
+            base_model_params=base_params,
+            max_lag=max_lag,                    # keep consistent with frozen_days logic
+            target_col=cfg.cols.target,
+            model_name=model_for_hpo,           # "lgbm" or "xgb" (derived from cfg.model.framework)
+            metric="RMSE",
+            n_trials=cfg.hpo.n_trials,
+            pruner=cfg.hpo.pruner,
+            cache_dir=cfg.hpo.cache_dir,        # cache fold features for reuse across trials
+            windows_limit=cfg.hpo.windows_limit,# start with 1 window for speed
+            SLICE_BY_DATE=SLICE_BY_DATE
+        )
+
+        print("[HPO] best_model_params:", hpo_result["best_model_params"])
+        print("[HPO] best_tuned_only:  ", hpo_result["best_tuned_only"])
+        print("[HPO] cv_mean:          ", hpo_result["cv_mean"])
+        print("[HPO] cv_by_fold:       ", hpo_result["cv_by_fold"])
 
 
 
@@ -214,6 +270,13 @@ cfg = SimpleNamespace(
             colsample_bytree=0.8,
             random_state=42,
         )
+    ),
+    hpo = SimpleNamespace(
+        enabled=True,        # set True to run HPO
+        n_trials=3,           # start small; increase later (e.g., 50–80)
+        windows_limit=2,      # use 2 CV window first for speed; set None to use all
+        pruner="median",      # "median" or "none"
+        cache_dir="cache/hpo" # where per-fold features are cached during HPO
     )
 )
 
