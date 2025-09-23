@@ -85,7 +85,7 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
     framework = str(getattr(model_cfg, "framework", "lightgbm")).lower()
     params = dict(getattr(model_cfg, "params", {}))
 
-    # [CHANGE] basic logging before prep
+    # basic logging before prep
     print(f"[TRAIN] Framework={framework} | Xtr={Xtr.shape}, Xva={Xva.shape}")
 
     # Prepare features
@@ -94,7 +94,7 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
     Xva_prep, _ = _prepare_features_for_framework(Xva, framework)
     prep_time = time.perf_counter() - t0
 
-    # [CHANGE] memory and categories info
+    # memory and categories info
     mem_tr = _mem_str(Xtr_prep.memory_usage(deep=True).sum())
     mem_va = _mem_str(Xva_prep.memory_usage(deep=True).sum())
     print(f"[TRAIN] Prepared in {prep_time:.2f}s | cat_cols={len(cat_cols)} | mem(Xtr)={mem_tr}, mem(Xva)={mem_va}")
@@ -110,7 +110,7 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
         early_stopping_rounds = params.pop("early_stopping_rounds", 200)
 
         model = lgb.LGBMRegressor(**params)
-        # [CHANGE] add log_evaluation for periodic progress
+        # add log_evaluation for periodic progress
         callbacks = [
             lgb.log_evaluation(period=50),
             lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=True),
@@ -123,7 +123,7 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
             callbacks=callbacks
         )
         train_time = time.perf_counter() - t0
-        # [CHANGE] print best iteration/score
+        # print best iteration/score
         best_iter = getattr(model, "best_iteration_", None)
         best_score = getattr(model, "best_score_", None)
         print(f"[TRAIN] Done in {train_time:.2f}s | best_iteration={best_iter} | best_score={best_score}")
@@ -136,26 +136,31 @@ def TRAIN_MODEL(Xtr: pd.DataFrame, y_tr: pd.Series,
         params.setdefault("learning_rate", 0.05)
         params.setdefault("n_estimators", 2000)
         params.setdefault("enable_categorical", True)
-        early_stopping_rounds = params.pop("early_stopping_rounds", 200)
-        eval_metric = params.pop("eval_metric", "rmse")
+        params.setdefault("eval_metric", "rmse")  # move eval_metric into params (constructor)
 
+        early_stopping_rounds = params.pop("early_stopping_rounds", 200)
+
+        # pass eval_metric via constructor; remove from fit
         model = xgb.XGBRegressor(**params)
-        # [CHANGE] verbose=True will print eval every ~10 rounds
+
+        # use callback-based early stopping (compatible with xgboost>=2.0)
+        callbacks = [xgb.callback.EarlyStopping(rounds=early_stopping_rounds, save_best=True)]
+
         model.fit(
             Xtr_prep, y_tr,
             eval_set=[(Xva_prep, y_va)],
-            eval_metric=eval_metric,
-            verbose=True,
-            early_stopping_rounds=early_stopping_rounds
+            callbacks=callbacks,
+            verbose=True
         )
+
         train_time = time.perf_counter() - t0
-        # [CHANGE] print best iteration/score
+        # robust best iteration/score retrieval
         best_iter = getattr(model, "best_iteration", None)
         best_score = getattr(model, "best_score", None)
-        # fallback to evals_result if needed
         if best_score is None and hasattr(model, "evals_result_"):
             try:
-                hist = model.evals_result_["validation_0"][eval_metric]
+                metric = params.get("eval_metric", "rmse")
+                hist = model.evals_result_["validation_0"][metric]
                 best_idx = int(np.argmin(hist))
                 best_iter = best_idx
                 best_score = hist[best_idx]
@@ -173,7 +178,7 @@ def PREDICT(model: object, X: pd.DataFrame, model_cfg) -> np.ndarray:
     Predict using the trained model, preparing features consistently.
     """
     framework = str(getattr(model_cfg, "framework", "lightgbm")).lower()
-    # [CHANGE] log shape before predict
+    # log shape before predict
     print(f"[PRED] Predicting with {framework} on X={X.shape}")
     t0 = time.perf_counter()
     Xp, _ = _prepare_features_for_framework(X, framework)
@@ -226,38 +231,3 @@ def AGGREGATE_FOLD_SCORES(fold_scores: list[dict]) -> dict:
             summary[k] = {"mean": float(vals.mean()), "std": float(vals.std(ddof=0))}
     return summary
 
-def TRAIN_MODEL_NO_VALIDATION(X: pd.DataFrame, y: pd.Series, model_cfg) -> object:
-    """
-    Train a final model on all data (no validation set).
-    """
-    framework = str(getattr(model_cfg, "framework", "lightgbm")).lower()
-    params = dict(getattr(model_cfg, "params", {}))
-
-    Xp, cat_cols = _prepare_features_for_framework(X, framework)
-
-    if framework == "lightgbm":
-        import lightgbm as lgb
-        params.setdefault("objective", "regression")
-        params.setdefault("metric", "rmse")
-        params.setdefault("n_estimators", 2000)
-        params.setdefault("learning_rate", 0.05)
-        params.setdefault("verbosity", -1)
-
-        model = lgb.LGBMRegressor(**params)
-        model.fit(Xp, y, categorical_feature=cat_cols if len(cat_cols) > 0 else "auto")
-        return model
-
-    elif framework == "xgboost":
-        import xgboost as xgb
-        params.setdefault("objective", "reg:squarederror")
-        params.setdefault("tree_method", "hist")
-        params.setdefault("learning_rate", 0.05)
-        params.setdefault("n_estimators", 2000)
-        params.setdefault("enable_categorical", True)
-
-        model = xgb.XGBRegressor(**params)
-        model.fit(Xp, y, verbose=True)
-        return model
-
-    else:
-        raise ValueError(f"Unsupported framework: {framework}")
