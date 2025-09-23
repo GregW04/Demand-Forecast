@@ -52,7 +52,7 @@ def MAKE_FEATURES(df: pd.DataFrame,
         print(f"[FEATS] date features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
     # Seasonality features
-    df = _ensure_df(create_seasonality_features(df, group_cols=gcols))  # [CHANGE]
+    df = _ensure_df(create_seasonality_features(df))  # [CHANGE]
     if timers:
         print(f"[FEATS] seasonality features in {time.perf_counter()-t0:.2f}s"); t0 = time.perf_counter()
 
