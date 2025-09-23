@@ -9,6 +9,7 @@ from JOIN_OIL_PROMOS import JOIN_OIL_PROMOS
 from features_block import *
 from feature_checks import check_features_quick
 from train_utils import *
+from DF_wakacyjne_wyzwanie.EDA.hypertune import HYPERTUNE_EMBEDDED_FS
 
 from types import SimpleNamespace
 import time
@@ -185,11 +186,7 @@ def run_modeling_pipeline(cfg):
     # 7) (Optional) Refit final model on all history up to the end of training
     #    (optionally up to scoring_period.t_min - 1)
     print('7) (Optional) Refit final model on all history up to the end of training')
-    full_hist = SLICE_BY_DATE(train, [MIN_DATE(train), MAX_DATE(train)])
-    X_full = MAKE_FEATURES(full_hist, max_lag) # TODO ensure that the function accepts this type of call
-    y_full = X_full[cfg.cols.target];  X_full = DROP_TARGET_COLS(X_full, cfg.cols.target)
-
-    final_model = TRAIN_MODEL_NO_VALIDATION(X_full, y_full, cfg.model)  # TODO
+    # TODO
 
 
 
